@@ -44,9 +44,8 @@ The **laptop** runs the operator page: confirm positions, verification walk, Sta
 The phone reads orientation (compass + tilt). That only changes with position if
 your **body faces the audience center** — the normal performance stance.
 
-The app samples **alpha, beta, and gamma** in the pocket at **two stage marks**
-(left and right edges), auto-picks the best axis, and uses **gyro+compass fusion**
-during the show to smooth pocket jitter.
+The app samples **alpha, beta, and gamma** in the pocket at **four stage marks**,
+auto-picks the best axis, and uses **gyro assist** during the show to smooth pocket jitter.
 
 ## Quick start
 
@@ -70,12 +69,14 @@ Mobile  (performer): https://192.168.x.x:3000/mobile
 
 ### 2. Laptop — operator page (`/operator`)
 
-Two-step calibration with **averaged pocket samples** on each Confirm:
+Four-step calibration with **averaged pocket samples** on each Confirm:
 
 | Step | Artist stands at | Operator action |
 | --- | --- | --- |
-| 1 | Left edge (projector shows target line) | Confirm (or Space) |
-| 2 | Right edge (projector shows target line) | Confirm |
+| 1 | Left edge | Confirm (or Space) |
+| 2 | Left of center | Confirm |
+| 3 | Right of center | Confirm |
+| 4 | Right edge | Confirm |
 
 At each mark: face audience center, hold still ~1 s while the server averages readings.
 
@@ -90,7 +91,7 @@ Walk the stage — spotlight follows. Same pocket, face audience center.
 
 While the operator calibrates on the laptop, the projector shows:
 
-- **Bright target line + label** at the current mark (where the artist should stand)
+- **Dashed target line** at the current mark (where the artist should stand)
 - **Dim preview dot** at the mapped position from confirmed marks so far
 
 During verification and live show, the full spotlight appears.
@@ -115,12 +116,17 @@ During verification and live show, the full spotlight appears.
 
 ### Stage Walk (primary)
 
-Pocket-based horizontal tracking with 2-point edge calibration, verification
+Pocket-based horizontal tracking with 4-point laptop calibration, verification
 step, multi-axis mapping, and gyro+compass fusion.
 
-### Pointer (experimental)
+### Pointer (manual spotlight)
 
 Hand-held laser-pointer aim. Calibrated on the phone.
+
+- **Left/right** → phone **gamma** (pan while pointing at screen)
+- **Up/down** → phone **beta** (tilt up/down)
+
+Hold the phone portrait, point at screen center, tap **Set Screen Center**, then aim to move the spotlight. Adjust `pointerSensitivityX` / `pointerSensitivityY` in settings if needed.
 
 ## Configuration
 

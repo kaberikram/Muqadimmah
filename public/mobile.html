@@ -232,7 +232,7 @@
       if (isPointer) {
         if (cal.isCalibrated && cal.centerAlpha !== null) {
           centerBtn.innerHTML =
-            `&#10003; Center Set<br /><span class="text-sm font-normal">α ${cal.centerAlpha.toFixed(1)}° β ${cal.centerBeta.toFixed(1)}°</span>`;
+            `&#10003; Center Set<br /><span class="text-sm font-normal">β ${cal.centerBeta.toFixed(1)}° γ ${(cal.centerGamma ?? 0).toFixed(1)}°</span>`;
           centerBtn.className = 'py-8 rounded-2xl bg-green-600 text-xl font-bold transition-colors';
           centerBtn.disabled = true;
           pointerStatus.textContent = 'Calibrated — aim to move the spotlight';

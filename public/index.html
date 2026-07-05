@@ -394,9 +394,10 @@
 
       if (state.trackingMode === 'pointer') {
         if (!cal.isCalibrated) return { x: cx, y: cy, mode: 'none', targetPct: 0.5 };
-        const { centerAlpha, centerBeta } = cal;
+        const { centerBeta, centerGamma } = cal;
+        const centerG = centerGamma ?? 0;
         return {
-          x: clamp(cx + angleDiff(orientation.alpha, centerAlpha) * sensX, 0, w),
+          x: clamp(cx + (orientation.gamma - centerG) * sensX, 0, w),
           y: clamp(cy + (orientation.beta - centerBeta) * sensY, 0, h),
           mode: 'live',
           targetPct: 0.5,
@@ -407,14 +408,12 @@
       if (phase === 'marks') {
         const axis = cal.mappingAxis || 'alpha';
         const captured = cal.points.filter((p) => p.snapshot).length;
-        const targetLabel = cal.points[cal.currentStep]?.label ?? '';
-        const targetPct = cal.points[cal.currentStep]?.pct ?? 0.5;
         if (captured === 0) {
-          return { x: cx, y: cy, mode: 'marks', targetPct, targetLabel };
+          return { x: cx, y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5 };
         }
         const value = getStageTrackingValue(axis, dt);
-        const pct = applyStageOffset(mapMultiPointToPct(value, cal.points, axis));
-        return { x: clamp(pct * w, 0, w), y: cy, mode: 'marks', targetPct, targetLabel, rawPct: pct };
+        let pct = applyStageOffset(mapMultiPointToPct(value, cal.points, axis));
+        return { x: clamp(pct * w, 0, w), y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5, rawPct: pct };
       }
 
       if (phase === 'verify' || phase === 'live') {
@@ -448,24 +447,16 @@
       ctx.fill();
     }
 
-    function drawTargetLine(w, h, pct, label) {
+    function drawTargetLine(w, h, pct) {
       const x = pct * w;
-      ctx.setLineDash([12, 8]);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
-      ctx.lineWidth = 3;
+      ctx.setLineDash([8, 12]);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h);
       ctx.stroke();
       ctx.setLineDash([]);
-
-      if (label) {
-        const fontSize = Math.round(Math.min(w, h) * 0.045);
-        ctx.font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-        ctx.fillText(`Stand here — ${label}`, x, fontSize * 1.6);
-      }
     }
 
     function draw(now) {
@@ -529,7 +520,7 @@
       ctx.fillRect(0, 0, w, h);
 
       if (isPreview) {
-        drawTargetLine(w, h, target.targetPct ?? 0.5, target.targetLabel);
+        drawTargetLine(w, h, target.targetPct ?? 0.5);
         drawSpot(currentX, currentY, w, h, 0.4, 0.65);
       } else if (isLive && intensity > 0) {
         drawSpot(currentX, currentY, w, h, intensity, 1);

@@ -20,6 +20,8 @@ const MAX_STAGE_OFFSET = 0.25;
 
 const STAGE_MARKERS = [
   { id: 'left', label: 'Left edge', pct: 0 },
+  { id: 'left-center', label: 'Left of center', pct: 0.33 },
+  { id: 'right-center', label: 'Right of center', pct: 0.67 },
   { id: 'right', label: 'Right edge', pct: 1 },
 ];
 
@@ -76,6 +78,7 @@ function createEmptyCalibration() {
     points: STAGE_MARKERS.map((m) => ({ ...m, snapshot: null })),
     centerAlpha: null,
     centerBeta: null,
+    centerGamma: null,
   };
 }
 
@@ -404,11 +407,14 @@ io.on('connection', (socket) => {
     }
     state.calibration.centerAlpha = data.alpha;
     state.calibration.centerBeta = data.beta;
+    state.calibration.centerGamma = data.gamma;
     state.calibration.phase = 'live';
     state.calibration.isCalibrated = true;
     broadcastState();
     if (typeof ack === 'function') ack({ ok: true, calibration: state.calibration });
-    console.log(`[calibrate] pointer center α=${data.alpha.toFixed(1)}° β=${data.beta.toFixed(1)}°`);
+    console.log(
+      `[calibrate] pointer center α=${data.alpha.toFixed(1)}° β=${data.beta.toFixed(1)}° γ=${data.gamma.toFixed(1)}°`
+    );
   });
 
   socket.on('confirm_stage_position', (_payload, ack) => {

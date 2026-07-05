@@ -32,7 +32,7 @@ test('calibration across 0/360 seam picks alpha axis with ~40° span', async () 
   const phone = await connectPhone();
   const operator = await connectSocket('operator');
 
-  const alphas = [340, 20];
+  const alphas = [340, 355, 5, 20];
   for (const alpha of alphas) {
     await emitSamples(phone, { alpha, noise: 0.3, count: 50 });
     await new Promise((resolve) => {
@@ -54,7 +54,7 @@ test('stillness clamp holds spotlight steady when still', async ({ page }) => {
   const phone = await connectPhone();
   const operator = await connectSocket('operator');
 
-  await calibrateStage(phone, operator, [340, 20]);
+  await calibrateStage(phone, operator, [340, 355, 5, 20]);
   expect(getState().calibration.phase).toBe('live');
 
   await emitSamples(phone, { alpha: 5, count: 30, tStart: 5000 });
@@ -83,7 +83,7 @@ test('walk lag stays under ~150 ms with truthful timestamps', async ({ page }) =
   const phone = await connectPhone();
   const operator = await connectSocket('operator');
 
-  await calibrateStage(phone, operator, [340, 20]);
+  await calibrateStage(phone, operator, [340, 355, 5, 20]);
   await emitSamples(phone, { alpha: 10, count: 30, tStart: 8000 });
   await page.goto(`${getBaseUrl()}/?test=1`);
   await waitForTestHook(page);
@@ -129,7 +129,7 @@ test('WiFi jitter immunity matches truthful packet timestamps', async ({ page })
   const phone = await connectPhone();
   const operator = await connectSocket('operator');
 
-  await calibrateStage(phone, operator, [340, 20]);
+  await calibrateStage(phone, operator, [340, 355, 5, 20]);
   await emitSamples(phone, { alpha: 10, count: 30, tStart: 8000 });
   await page.goto(`${getBaseUrl()}/?test=1`);
   await waitForTestHook(page);
@@ -174,7 +174,7 @@ test('v1 compat tracks without timestamps or still flag', async ({ page }) => {
   const phone = await connectPhone();
   const operator = await connectSocket('operator');
 
-  await calibrateStage(phone, operator, [340, 20]);
+  await calibrateStage(phone, operator, [340, 355, 5, 20]);
   await emitSamples(phone, { alpha: 10, count: 30, tStart: 8000 });
   await page.goto(`${getBaseUrl()}/?test=1`);
   await waitForTestHook(page);
@@ -200,7 +200,7 @@ test('drift correction nudge and anchor shift projector position', async ({ page
   const phone = await connectPhone();
   const operator = await connectSocket('operator');
 
-  await calibrateStage(phone, operator, [340, 20]);
+  await calibrateStage(phone, operator, [340, 355, 5, 20]);
   await emitSamples(phone, { alpha: 5, count: 30, tStart: 30000 });
   await page.goto(`${getBaseUrl()}/?test=1`);
   await waitForTestHook(page);
