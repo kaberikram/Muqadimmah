@@ -1,14 +1,5 @@
 /**
  * Gyro Spotlight Tracker — local relay server.
- *
- * Serves the desktop renderer at / and the mobile transmitter at /mobile,
- * relays phone orientation data to desktops over Socket.IO, and holds the
- * single shared state object both clients sync against.
- *
- * Runs HTTPS with a boot-time self-signed certificate: iOS only exposes
- * DeviceOrientationEvent.requestPermission() and the Wake Lock API in a
- * secure context, so plain http on a LAN IP would never show the motion
- * permission prompt. Everything still works fully offline.
  */
 
 const os = require('os');
@@ -25,14 +16,54 @@ const MIN_CALIBRATION_ARC_DEG = 5;
 const MIN_POCKET_QUALITY_SPAN = 4;
 const ORIENTATION_BUFFER_SIZE = 50;
 const MIN_CONFIRM_SAMPLES = 5;
+const MAX_STAGE_OFFSET = 0.25;
 
-/** Stage marks confirmed from the laptop while the artist stands in place. */
 const STAGE_MARKERS = [
   { id: 'left', label: 'Left edge', pct: 0 },
-  { id: 'left-center', label: 'Left of center', pct: 0.33 },
-  { id: 'right-center', label: 'Right of center', pct: 0.67 },
   { id: 'right', label: 'Right edge', pct: 1 },
 ];
+
+const SETTINGS_DEFAULTS = {
+  screenWidth: 1920,
+  stageSmoothingFactor: 0.1,
+  pointerSmoothingFactor: 0.15,
+  pointerSensitivityX: 50,
+  pointerSensitivityY: 40,
+  gyroCorrectionGain: 0.03,
+  stillAccelVarEnter: 0.05,
+  stillAccelVarExit: 0.15,
+  stillGyroEnterDps: 8,
+  stillGyroExitDps: 20,
+  stillEnterMs: 400,
+  fusionTauBase: 0.5,
+  fusionTauStill: 0.15,
+  fusionTauFast: 1.5,
+  fastRotThresholdDps: 50,
+  oneEuroMinCutoff: 0.6,
+  oneEuroBeta: 1.2,
+  oneEuroDCutoff: 1.0,
+  useOneEuro: true,
+};
+
+const SETTINGS_RANGES = {
+  stillAccelVarEnter: [0.001, 1],
+  stillAccelVarExit: [0.001, 2],
+  stillGyroEnterDps: [0, 90],
+  stillGyroExitDps: [0, 180],
+  stillEnterMs: [100, 2000],
+  fusionTauBase: [0.05, 5],
+  fusionTauStill: [0.05, 2],
+  fusionTauFast: [0.1, 10],
+  fastRotThresholdDps: [10, 200],
+  oneEuroMinCutoff: [0.1, 5],
+  oneEuroBeta: [0, 10],
+  oneEuroDCutoff: [0.1, 5],
+  stageSmoothingFactor: [0.01, 1],
+  pointerSmoothingFactor: [0.01, 1],
+  gyroCorrectionGain: [0.001, 0.2],
+  pointerSensitivityX: [1, 200],
+  pointerSensitivityY: [1, 200],
+};
 
 function createEmptyCalibration() {
   return {
@@ -51,22 +82,29 @@ function createEmptyCalibration() {
 const state = {
   isPhoneConnected: false,
   trackingMode: 'stage',
+  stageOffsetPct: 0,
   calibration: createEmptyCalibration(),
-  settings: {
-    screenWidth: 1920,
-    stageSmoothingFactor: 0.1,
-    pointerSmoothingFactor: 0.15,
-    pointerSensitivityX: 50,
-    pointerSensitivityY: 40,
-    gyroCorrectionGain: 0.03,
+  settings: { ...SETTINGS_DEFAULTS },
+  currentOrientation: {
+    alpha: 0,
+    beta: 90,
+    gamma: 0,
+    rotationRate: null,
+    t: null,
+    still: false,
+    omega: 0,
+    v: 1,
   },
-  currentOrientation: { alpha: 0, beta: 90, gamma: 0, rotationRate: null },
 };
 
 const orientationBuffer = [];
 
 function angleDiff(a, b) {
   return ((a - b + 540) % 360) - 180;
+}
+
+function clamp(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, v));
 }
 
 function isValidAngle(v) {
@@ -107,6 +145,64 @@ function isValidOrientation(data) {
   );
 }
 
+function buildOrientationPayload(data) {
+  const sample = {
+    alpha: data.alpha,
+    beta: data.beta,
+    gamma: data.gamma,
+  };
+  const payload = {
+    ...sample,
+    rotationRate: parseRotationRate(data),
+    t: typeof data.t === 'number' && Number.isFinite(data.t) && data.t >= 0 ? data.t : null,
+    still: data.still === true,
+    omega: typeof data.omega === 'number' && Number.isFinite(data.omega) && data.omega >= 0 ? data.omega : 0,
+    v: data.v === 2 ? 2 : 1,
+  };
+  return { sample, payload };
+}
+
+function axisDelta(axis, a, b) {
+  return axis === 'alpha' ? angleDiff(a, b) : a - b;
+}
+
+function mapMultiPointToPct(value, points, axis) {
+  const pts = points.filter((p) => p.snapshot);
+  if (pts.length < 2) return 0.5;
+
+  function val(p) {
+    return p.snapshot[axis];
+  }
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const v0 = val(pts[i]);
+    const v1 = val(pts[i + 1]);
+    const span = axisDelta(axis, v1, v0);
+    if (Math.abs(span) < 0.001) continue;
+    const t = axisDelta(axis, value, v0) / span;
+    if (t >= 0 && t <= 1) {
+      return pts[i].pct + t * (pts[i + 1].pct - pts[i].pct);
+    }
+  }
+
+  const v0 = val(pts[0]);
+  const v1 = val(pts[1]);
+  const span0 = axisDelta(axis, v1, v0);
+  const pos0 = axisDelta(axis, value, v0);
+  if (Math.abs(span0) >= 0.001 && Math.sign(pos0) !== Math.sign(span0)) {
+    return clamp(pts[0].pct + (pos0 / span0) * (pts[1].pct - pts[0].pct), 0, 1);
+  }
+
+  const last = pts.length - 1;
+  const spanL = axisDelta(axis, val(pts[last]), val(pts[last - 1]));
+  const posL = axisDelta(axis, value, val(pts[last - 1]));
+  return clamp(pts[last - 1].pct + (posL / spanL) * (pts[last].pct - pts[last - 1].pct), 0, 1);
+}
+
+function clearOrientationBuffer() {
+  orientationBuffer.length = 0;
+}
+
 function pushOrientationSample(sample) {
   orientationBuffer.push(sample);
   if (orientationBuffer.length > ORIENTATION_BUFFER_SIZE) {
@@ -139,10 +235,6 @@ function averageOrientationFromBuffer() {
     beta: averageLinear(samples, 'beta'),
     gamma: averageLinear(samples, 'gamma'),
   };
-}
-
-function axisDelta(axis, a, b) {
-  return axis === 'alpha' ? angleDiff(a, b) : a - b;
 }
 
 function axisValuesMonotonic(axis, points) {
@@ -215,6 +307,18 @@ function resetStageCapture(cal) {
   for (const point of cal.points) point.snapshot = null;
 }
 
+function resetCalibrationState() {
+  state.calibration = createEmptyCalibration();
+  state.stageOffsetPct = 0;
+}
+
+function clampSetting(key, value) {
+  const range = SETTINGS_RANGES[key];
+  if (!range) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return clamp(value, range[0], range[1]);
+}
+
 function detectLanIp() {
   const candidates = [];
   for (const ifaces of Object.values(os.networkInterfaces())) {
@@ -279,23 +383,16 @@ io.on('connection', (socket) => {
 
   socket.on('orientation_update', (data) => {
     if (!isValidOrientation(data)) return;
-    const sample = {
-      alpha: data.alpha,
-      beta: data.beta,
-      gamma: data.gamma,
-    };
+    const { sample, payload } = buildOrientationPayload(data);
     pushOrientationSample(sample);
-    state.currentOrientation = {
-      ...sample,
-      rotationRate: parseRotationRate(data),
-    };
-    socket.broadcast.volatile.emit('orientation_update', state.currentOrientation);
+    state.currentOrientation = payload;
+    socket.broadcast.volatile.emit('orientation_update', payload);
   });
 
   socket.on('set_tracking_mode', (mode) => {
     if (mode !== 'pointer' && mode !== 'stage') return;
     state.trackingMode = mode;
-    state.calibration = createEmptyCalibration();
+    resetCalibrationState();
     broadcastState();
     console.log(`[mode] ${mode}`);
   });
@@ -407,9 +504,62 @@ io.on('connection', (socket) => {
   });
 
   socket.on('reset_calibration', () => {
-    state.calibration = createEmptyCalibration();
+    resetCalibrationState();
     broadcastState();
     console.log('[calibrate] reset');
+  });
+
+  socket.on('nudge_stage_offset', ({ deltaPct }, ack) => {
+    if (typeof deltaPct !== 'number' || !Number.isFinite(deltaPct)) {
+      if (typeof ack === 'function') ack({ ok: false });
+      return;
+    }
+    state.stageOffsetPct = clamp(state.stageOffsetPct + deltaPct, -MAX_STAGE_OFFSET, MAX_STAGE_OFFSET);
+    broadcastState();
+    if (typeof ack === 'function') ack({ ok: true, stageOffsetPct: state.stageOffsetPct });
+    console.log(`[offset] nudge → ${state.stageOffsetPct.toFixed(3)}`);
+  });
+
+  socket.on('anchor_stage_center', (_payload, ack) => {
+    const cal = state.calibration;
+    if (state.trackingMode !== 'stage' || !cal.points || cal.mappingAxis == null) {
+      if (typeof ack === 'function') ack({ ok: false, error: 'Stage mapping not ready.' });
+      return;
+    }
+    const axis = cal.mappingAxis;
+    const value = state.currentOrientation[axis];
+    const pct = mapMultiPointToPct(value, cal.points, axis);
+    state.stageOffsetPct = clamp(0.5 - pct, -MAX_STAGE_OFFSET, MAX_STAGE_OFFSET);
+    broadcastState();
+    if (typeof ack === 'function') {
+      ack({ ok: true, stageOffsetPct: state.stageOffsetPct, mappedPct: pct });
+    }
+    console.log(`[offset] anchor center → ${state.stageOffsetPct.toFixed(3)} (mapped ${pct.toFixed(3)})`);
+  });
+
+  socket.on('clear_stage_offset', (_payload, ack) => {
+    state.stageOffsetPct = 0;
+    broadcastState();
+    if (typeof ack === 'function') ack({ ok: true, stageOffsetPct: 0 });
+    console.log('[offset] cleared');
+  });
+
+  socket.on('update_settings', ({ key, value }, ack) => {
+    if (key === 'useOneEuro') {
+      state.settings.useOneEuro = !!value;
+      broadcastState();
+      if (typeof ack === 'function') ack({ ok: true, settings: state.settings });
+      return;
+    }
+    const clamped = clampSetting(key, value);
+    if (clamped === null || !(key in SETTINGS_DEFAULTS)) {
+      if (typeof ack === 'function') ack({ ok: false, error: 'Invalid setting.' });
+      return;
+    }
+    state.settings[key] = clamped;
+    broadcastState();
+    if (typeof ack === 'function') ack({ ok: true, settings: state.settings });
+    console.log(`[settings] ${key} = ${clamped}`);
   });
 
   socket.on('disconnect', () => {
@@ -422,18 +572,34 @@ io.on('connection', (socket) => {
   });
 });
 
-QRCode.toDataURL(mobileUrl, { margin: 1, width: 512, errorCorrectionLevel: 'M' })
-  .then((dataUrl) => {
-    qrDataUrl = dataUrl;
-    httpServer.listen(PORT, '0.0.0.0', () => {
-      console.log('Gyro Spotlight Tracker');
-      console.log(`  Desktop (projector): https://${lanIp}:${PORT}/`);
-      console.log(`  Operator (laptop):   ${operatorUrl}`);
-      console.log(`  Mobile  (performer): ${mobileUrl}`);
-      console.log('  Accept the self-signed certificate warning on both devices.');
+if (require.main === module) {
+  QRCode.toDataURL(mobileUrl, { margin: 1, width: 512, errorCorrectionLevel: 'M' })
+    .then((dataUrl) => {
+      qrDataUrl = dataUrl;
+      httpServer.listen(PORT, '0.0.0.0', () => {
+        console.log('Gyro Spotlight Tracker');
+        console.log(`  Desktop (projector): https://${lanIp}:${PORT}/`);
+        console.log(`  Operator (laptop):   ${operatorUrl}`);
+        console.log(`  Mobile  (performer): ${mobileUrl}`);
+        console.log('  Accept the self-signed certificate warning on both devices.');
+      });
+    })
+    .catch((err) => {
+      console.error('Failed to generate QR code:', err);
+      process.exit(1);
     });
-  })
-  .catch((err) => {
-    console.error('Failed to generate QR code:', err);
-    process.exit(1);
-  });
+}
+
+module.exports = {
+  httpServer,
+  io,
+  state,
+  mapMultiPointToPct,
+  angleDiff,
+  axisDelta,
+  resetCalibrationState,
+  validateStageCalibration,
+  buildOrientationPayload,
+  clearOrientationBuffer,
+  PORT,
+};

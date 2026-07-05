@@ -10,7 +10,6 @@
 <body class="bg-neutral-950 text-white min-h-screen select-none touch-manipulation">
   <div class="max-w-md mx-auto px-5 py-6 flex flex-col gap-5 min-h-screen">
 
-    <!-- Status header -->
     <header class="flex items-center justify-between">
       <h1 class="text-xl font-bold tracking-tight">Spotlight Transmitter</h1>
       <div class="flex items-center gap-2">
@@ -19,7 +18,6 @@
       </div>
     </header>
 
-    <!-- Mode switch -->
     <div class="grid grid-cols-2 gap-2 p-1 bg-neutral-900 rounded-xl">
       <button id="mode-pointer"
         class="py-3 rounded-lg text-sm font-bold bg-neutral-800 text-neutral-400 transition-colors">
@@ -31,7 +29,6 @@
       </button>
     </div>
 
-    <!-- Live orientation readout -->
     <div class="bg-neutral-900 rounded-2xl p-5 text-center">
       <p class="text-neutral-400 text-sm uppercase tracking-widest mb-1">Orientation</p>
       <div class="grid grid-cols-2 gap-4">
@@ -47,13 +44,11 @@
       <p id="sensor-status" class="text-neutral-500 text-sm mt-3">Sensors inactive</p>
     </div>
 
-    <!-- Step 1: permissions -->
     <button id="activate-btn"
       class="w-full py-6 rounded-2xl bg-blue-600 active:bg-blue-700 text-2xl font-bold shadow-lg transition-colors">
       Activate Motion Sensors
     </button>
 
-    <!-- Step 2: pointer calibration -->
     <div id="pointer-panel" class="hidden flex-col gap-3 opacity-40 pointer-events-none transition-opacity">
       <p class="text-neutral-400 text-sm text-center">
         Hold the phone like a laser pointer. Aim at the <strong class="text-white">center</strong> of the screen, then tap:
@@ -65,7 +60,6 @@
       <p id="pointer-status" class="text-center text-sm text-neutral-500">Point at center to calibrate</p>
     </div>
 
-    <!-- Stage: pocket mode — calibration happens on the laptop -->
     <div id="stage-panel" class="flex flex-col gap-3 opacity-40 pointer-events-none transition-opacity">
       <div class="bg-neutral-900 rounded-xl p-4 text-sm text-neutral-400 leading-relaxed">
         <p class="text-neutral-300 font-semibold mb-2">Pocket mode</p>
@@ -84,7 +78,6 @@
       Recalibrate
     </button>
 
-    <!-- Error / event log -->
     <details class="mt-auto">
       <summary class="text-neutral-500 text-sm cursor-pointer py-2">Event log</summary>
       <div id="log" class="bg-neutral-900 rounded-xl p-3 text-xs font-mono text-neutral-400 max-h-40 overflow-y-auto whitespace-pre-wrap break-words"></div>
@@ -113,13 +106,27 @@
     const stageStatus = document.getElementById('stage-status');
     const logEl = document.getElementById('log');
 
+    const ACCEL_BUF_SIZE = 32;
+    const ALPHA_EMA = 0.2;
+
     let sensorsActive = false;
     let trackingMode = 'stage';
     let currentOrientation = null;
     let wakeLock = null;
     let smoothedAlpha = null;
     let latestRotationRate = null;
-    const ALPHA_EMA = 0.2;
+    let latestMotionT = 0;
+    let latestOmega = 0;
+    let isStill = false;
+    let stillEnterStart = null;
+    let orientSource = 'none';
+    const accelMagBuf = [];
+
+    let stillAccelVarEnter = 0.05;
+    let stillAccelVarExit = 0.15;
+    let stillGyroEnterDps = 8;
+    let stillGyroExitDps = 20;
+    let stillEnterMs = 400;
 
     function angleDiff(a, b) {
       return ((a - b + 540) % 360) - 180;
@@ -138,6 +145,37 @@
 
     function round1(v) {
       return Math.round(v * 10) / 10;
+    }
+
+    function applySettings(settings) {
+      if (!settings) return;
+      stillAccelVarEnter = settings.stillAccelVarEnter ?? stillAccelVarEnter;
+      stillAccelVarExit = settings.stillAccelVarExit ?? stillAccelVarExit;
+      stillGyroEnterDps = settings.stillGyroEnterDps ?? stillGyroEnterDps;
+      stillGyroExitDps = settings.stillGyroExitDps ?? stillGyroExitDps;
+      stillEnterMs = settings.stillEnterMs ?? stillEnterMs;
+    }
+
+    function accelVariance() {
+      if (accelMagBuf.length < 8) return Infinity;
+      const mean = accelMagBuf.reduce((a, b) => a + b, 0) / accelMagBuf.length;
+      return accelMagBuf.reduce((s, v) => s + (v - mean) ** 2, 0) / accelMagBuf.length;
+    }
+
+    function updateStillness() {
+      const var_ = accelVariance();
+      const now = performance.now();
+      if (!isStill) {
+        if (var_ < stillAccelVarEnter && latestOmega < stillGyroEnterDps) {
+          if (stillEnterStart === null) stillEnterStart = now;
+          if (now - stillEnterStart >= stillEnterMs) isStill = true;
+        } else {
+          stillEnterStart = null;
+        }
+      } else if (var_ > stillAccelVarExit || latestOmega > stillGyroExitDps) {
+        isStill = false;
+        stillEnterStart = null;
+      }
     }
 
     function renderModeButtons() {
@@ -172,15 +210,17 @@
     });
     socket.on('connect_error', (err) => log(`Socket error: ${err.message}`));
 
-    socket.on('state_update', (state) => {
-      trackingMode = state.trackingMode || 'stage';
+    socket.on('state_update', (s) => {
+      trackingMode = s.trackingMode || 'stage';
+      applySettings(s.settings);
       renderModeButtons();
-      renderCalibration(state);
+      renderCalibration(s);
     });
-    socket.on('init', ({ state }) => {
-      trackingMode = state.trackingMode || 'stage';
+    socket.on('init', ({ state: s }) => {
+      trackingMode = s.trackingMode || 'stage';
+      applySettings(s.settings);
       renderModeButtons();
-      renderCalibration(state);
+      renderCalibration(s);
     });
 
     function renderCalibration(state) {
@@ -227,7 +267,7 @@
         stageStatus.textContent = `Stand at: ${label} — operator confirms on laptop (${current + 1}/${total})`;
         stageStatus.className = 'text-center text-sm text-blue-400 font-semibold';
       } else if (sensorsActive) {
-        stageStatus.textContent = 'Phone in pocket — follow the laptop screen';
+        stageStatus.textContent = 'Phone in pocket — follow the operator laptop';
         stageStatus.className = 'text-center text-sm text-neutral-400';
       } else {
         stageStatus.textContent = 'Activate sensors, then pocket the phone';
@@ -242,17 +282,35 @@
         beta: currentOrientation.beta,
         gamma: currentOrientation.gamma,
         rotationRate: latestRotationRate,
+        t: latestMotionT || performance.now(),
+        still: isStill,
+        omega: round1(latestOmega),
+        v: 2,
       });
     }
 
     function handleMotion(event) {
+      const accel = event.acceleration || event.accelerationIncludingGravity;
+      if (accel && typeof accel.x === 'number') {
+        accelMagBuf.push(Math.hypot(accel.x, accel.y, accel.z));
+        if (accelMagBuf.length > ACCEL_BUF_SIZE) accelMagBuf.shift();
+      }
+
       const rr = event.rotationRate;
-      if (!rr) return;
-      latestRotationRate = {
-        alpha: round1(rr.alpha),
-        beta: round1(rr.beta),
-        gamma: round1(rr.gamma),
-      };
+      if (rr) {
+        latestRotationRate = {
+          alpha: round1(rr.alpha),
+          beta: round1(rr.beta),
+          gamma: round1(rr.gamma),
+        };
+        latestOmega = Math.hypot(rr.alpha, rr.beta, rr.gamma);
+      }
+
+      if (typeof event.timeStamp === 'number' && Number.isFinite(event.timeStamp)) {
+        latestMotionT = event.timeStamp;
+      }
+
+      updateStillness();
       if (currentOrientation) emitOrientation();
     }
 
@@ -281,10 +339,7 @@
     }
 
     async function acquireWakeLock() {
-      if (!('wakeLock' in navigator)) {
-        log('Wake Lock API unavailable');
-        return;
-      }
+      if (!('wakeLock' in navigator)) return;
       try {
         wakeLock = await navigator.wakeLock.request('screen');
         wakeLock.addEventListener('release', () => log('Wake lock released'));
@@ -318,8 +373,12 @@
           }
         }
 
-        window.addEventListener('deviceorientation', handleOrientation);
+        const useAbsolute = 'ondeviceorientationabsolute' in window;
+        orientSource = useAbsolute ? 'deviceorientationabsolute' : 'deviceorientation';
+        window.addEventListener(orientSource, handleOrientation);
         window.addEventListener('devicemotion', handleMotion);
+        log(`Orientation source: ${orientSource}`);
+
         sensorsActive = true;
         socket.emit('phone_connected');
         await acquireWakeLock();
@@ -327,11 +386,11 @@
         activateBtn.textContent = '✓ Sensors Active';
         activateBtn.className = 'w-full py-6 rounded-2xl bg-green-600 text-2xl font-bold shadow-lg';
         activateBtn.disabled = true;
-        sensorStatus.textContent = 'Streaming orientation…';
+        sensorStatus.textContent = `Streaming (${orientSource})…`;
         sensorStatus.className = 'text-green-400 text-sm mt-3';
         enableCalibrationPanel();
         if (trackingMode === 'stage') {
-          stageStatus.textContent = 'Put phone in pocket — follow laptop screen';
+          stageStatus.textContent = 'Put phone in pocket — follow operator laptop';
           stageStatus.className = 'text-center text-sm text-blue-400 font-semibold';
         }
         log('Sensors activated — pocket the phone for stage mode');

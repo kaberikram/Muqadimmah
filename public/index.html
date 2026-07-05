@@ -88,6 +88,7 @@
     'use strict';
 
     const socket = io();
+    const isTestMode = new URLSearchParams(window.location.search).get('test') === '1';
 
     const setupView = document.getElementById('setup-view');
     const pointerCalView = document.getElementById('pointer-cal-view');
@@ -101,17 +102,70 @@
     const MAX_ALPHA_JUMP_DEG = 20;
 
     let state = null;
-    let orientation = { alpha: 0, beta: 90, gamma: 0, rotationRate: null };
+    let orientation = { alpha: 0, beta: 90, gamma: 0, rotationRate: null, t: null, still: false, omega: 0, v: 1 };
     let currentX = null;
     let currentY = null;
     let smoothingFactor = 0.1;
     let gyroCorrectionGain = 0.03;
     let sensX = 50;
     let sensY = 40;
+    let fusionTauBase = 0.5;
+    let fusionTauStill = 0.15;
+    let fusionTauFast = 1.5;
+    let fastRotThresholdDps = 50;
+    let useOneEuro = true;
+    let oneEuroMinCutoff = 0.6;
+    let oneEuroBeta = 1.2;
+    let oneEuroDCutoff = 1.0;
     let disconnectedAt = null;
     let filteredAlpha = null;
     let fusedValue = null;
+    let lastPacketT = null;
+    let packetFusionActive = false;
+    let stillPct = null;
+    let lastRenderedPct = 0.5;
     let lastFrameTime = null;
+
+    class OneEuro {
+      constructor({ minCutoff, beta, dCutoff }) {
+        this.minCutoff = minCutoff;
+        this.beta = beta;
+        this.dCutoff = dCutoff;
+        this.x = null;
+        this.dx = 0;
+        this.tPrev = null;
+      }
+
+      reset() {
+        this.x = null;
+        this.dx = 0;
+        this.tPrev = null;
+      }
+
+      alpha(cutoff, dt) {
+        const tau = 1 / (2 * Math.PI * cutoff);
+        return 1 / (1 + tau / dt);
+      }
+
+      filter(value, t) {
+        if (this.tPrev === null) {
+          this.x = value;
+          this.tPrev = t;
+          return value;
+        }
+        const dt = Math.max((t - this.tPrev) / 1000, 1 / 120);
+        this.tPrev = t;
+        const aD = this.alpha(this.dCutoff, dt);
+        const dx = (value - this.x) / dt;
+        this.dx = aD * dx + (1 - aD) * this.dx;
+        const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
+        const a = this.alpha(cutoff, dt);
+        this.x = a * value + (1 - a) * this.x;
+        return this.x;
+      }
+    }
+
+    const stageEuro = new OneEuro({ minCutoff: oneEuroMinCutoff, beta: oneEuroBeta, dCutoff: oneEuroDCutoff });
 
     function angleDiff(a, b) {
       return ((a - b + 540) % 360) - 180;
@@ -123,6 +177,15 @@
 
     function axisDelta(axis, a, b) {
       return axis === 'alpha' ? angleDiff(a, b) : a - b;
+    }
+
+    function resetTrackingState() {
+      filteredAlpha = null;
+      fusedValue = null;
+      lastPacketT = null;
+      packetFusionActive = false;
+      stillPct = null;
+      stageEuro.reset();
     }
 
     function resizeCanvas() {
@@ -143,6 +206,23 @@
       gyroCorrectionGain = settings.gyroCorrectionGain ?? gyroCorrectionGain;
       sensX = settings.pointerSensitivityX ?? sensX;
       sensY = settings.pointerSensitivityY ?? sensY;
+      fusionTauBase = settings.fusionTauBase ?? fusionTauBase;
+      fusionTauStill = settings.fusionTauStill ?? fusionTauStill;
+      fusionTauFast = settings.fusionTauFast ?? fusionTauFast;
+      fastRotThresholdDps = settings.fastRotThresholdDps ?? fastRotThresholdDps;
+      useOneEuro = settings.useOneEuro ?? useOneEuro;
+      oneEuroMinCutoff = settings.oneEuroMinCutoff ?? oneEuroMinCutoff;
+      oneEuroBeta = settings.oneEuroBeta ?? oneEuroBeta;
+      oneEuroDCutoff = settings.oneEuroDCutoff ?? oneEuroDCutoff;
+      stageEuro.minCutoff = oneEuroMinCutoff;
+      stageEuro.beta = oneEuroBeta;
+      stageEuro.dCutoff = oneEuroDCutoff;
+    }
+
+    function currentFusionTau(still, omega) {
+      if (still) return fusionTauStill;
+      if (omega > fastRotThresholdDps) return fusionTauFast;
+      return fusionTauBase;
     }
 
     function filterStageAlpha(alpha) {
@@ -186,9 +266,54 @@
       return clamp(pts[last - 1].pct + (posL / spanL) * (pts[last].pct - pts[last - 1].pct), 0, 1);
     }
 
+    function applyStageOffset(pct) {
+      return clamp(pct + (state && state.stageOffsetPct ? state.stageOffsetPct : 0), 0, 1);
+    }
+
+    function fuseOnPacket(data) {
+      const cal = state && state.calibration;
+      if (!cal || state.trackingMode !== 'stage') return;
+
+      const axis = cal.mappingAxis || 'alpha';
+      const compass = data[axis];
+      const rate = data.rotationRate && data.rotationRate[axis];
+
+      if (typeof data.t !== 'number' || !Number.isFinite(data.t)) {
+        packetFusionActive = false;
+        return;
+      }
+
+      packetFusionActive = true;
+      const dtS = lastPacketT === null
+        ? 0
+        : clamp((data.t - lastPacketT) / 1000, 0, 0.1);
+      lastPacketT = data.t;
+
+      if (fusedValue === null) fusedValue = compass;
+
+      if (rate != null && dtS > 0) {
+        fusedValue += rate * dtS;
+      }
+
+      if (dtS > 0) {
+        const pull = 1 - Math.exp(-dtS / currentFusionTau(data.still, data.omega || 0));
+        if (axis === 'alpha') {
+          fusedValue = (fusedValue + angleDiff(compass, fusedValue) * pull + 360) % 360;
+        } else {
+          fusedValue += (compass - fusedValue) * pull;
+        }
+      } else if (fusedValue === null) {
+        fusedValue = compass;
+      }
+    }
+
     function getStageTrackingValue(axis, dt) {
       const compass = orientation[axis];
       const rate = orientation.rotationRate && orientation.rotationRate[axis];
+
+      if (packetFusionActive && fusedValue !== null) {
+        return axis === 'alpha' ? filterStageAlpha(fusedValue) : fusedValue;
+      }
 
       if (rate == null || dt == null || dt <= 0) {
         fusedValue = compass;
@@ -250,29 +375,31 @@
       if (s.isPhoneConnected) disconnectedAt = null;
       else if (wasConnected) disconnectedAt = performance.now();
       if (!s.calibration.isCalibrated && s.calibration.phase === 'marks') {
-        filteredAlpha = null;
-        fusedValue = null;
+        resetTrackingState();
       }
       renderViews();
     });
 
     socket.on('orientation_update', (data) => {
+      fuseOnPacket(data);
       orientation = data;
+      if (!orientation.still) stillPct = null;
     });
 
     function computeTarget(w, h, dt) {
       const cx = w / 2;
       const cy = h / 2;
       const cal = state && state.calibration;
-      if (!cal) return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none' };
+      if (!cal) return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none', targetPct: 0.5 };
 
       if (state.trackingMode === 'pointer') {
-        if (!cal.isCalibrated) return { x: cx, y: cy, mode: 'none' };
+        if (!cal.isCalibrated) return { x: cx, y: cy, mode: 'none', targetPct: 0.5 };
         const { centerAlpha, centerBeta } = cal;
         return {
           x: clamp(cx + angleDiff(orientation.alpha, centerAlpha) * sensX, 0, w),
           y: clamp(cy + (orientation.beta - centerBeta) * sensY, 0, h),
           mode: 'live',
+          targetPct: 0.5,
         };
       }
 
@@ -280,20 +407,32 @@
       if (phase === 'marks') {
         const axis = cal.mappingAxis || 'alpha';
         const captured = cal.points.filter((p) => p.snapshot).length;
-        if (captured === 0) return { x: cx, y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5 };
+        const targetLabel = cal.points[cal.currentStep]?.label ?? '';
+        const targetPct = cal.points[cal.currentStep]?.pct ?? 0.5;
+        if (captured === 0) {
+          return { x: cx, y: cy, mode: 'marks', targetPct, targetLabel };
+        }
         const value = getStageTrackingValue(axis, dt);
-        const pct = mapMultiPointToPct(value, cal.points, axis);
-        return { x: clamp(pct * w, 0, w), y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5 };
+        const pct = applyStageOffset(mapMultiPointToPct(value, cal.points, axis));
+        return { x: clamp(pct * w, 0, w), y: cy, mode: 'marks', targetPct, targetLabel, rawPct: pct };
       }
 
       if (phase === 'verify' || phase === 'live') {
         const axis = cal.mappingAxis || 'alpha';
         const value = getStageTrackingValue(axis, dt);
-        const pct = mapMultiPointToPct(value, cal.points, axis);
-        return { x: clamp(pct * w, 0, w), y: cy, mode: phase === 'verify' ? 'verify' : 'live' };
+        let pct = applyStageOffset(mapMultiPointToPct(value, cal.points, axis));
+
+        if (orientation.still) {
+          if (stillPct === null) stillPct = lastRenderedPct;
+          pct = stillPct;
+        }
+
+        lastRenderedPct = pct;
+        const targetX = clamp(pct * w, 0, w);
+        return { x: targetX, y: cy, mode: phase === 'verify' ? 'verify' : 'live', rawPct: pct, targetPct: pct };
       }
 
-      return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none' };
+      return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none', targetPct: 0.5 };
     }
 
     function drawSpot(x, y, w, h, intensity, scale) {
@@ -309,20 +448,43 @@
       ctx.fill();
     }
 
-    function drawTargetLine(w, h, pct) {
+    function drawTargetLine(w, h, pct, label) {
       const x = pct * w;
-      ctx.setLineDash([8, 12]);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
-      ctx.lineWidth = 2;
+      ctx.setLineDash([12, 8]);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+      ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h);
       ctx.stroke();
       ctx.setLineDash([]);
+
+      if (label) {
+        const fontSize = Math.round(Math.min(w, h) * 0.045);
+        ctx.font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.fillText(`Stand here — ${label}`, x, fontSize * 1.6);
+      }
     }
 
     function draw(now) {
       requestAnimationFrame(draw);
+
+      if (isTestMode) {
+        window.__spotlightTestHook = {
+          currentX,
+          currentY,
+          lastRenderedPct,
+          fusedValue,
+          packetFusionActive,
+          stillPct,
+          orientation: { ...orientation },
+          stageOffsetPct: state && state.stageOffsetPct,
+          canvasVisible: canvas.style.display !== 'none',
+        };
+      }
+
       if (canvas.style.display === 'none') return;
 
       const dt = lastFrameTime === null ? 0 : Math.min((now - lastFrameTime) / 1000, 0.05);
@@ -333,7 +495,7 @@
       let target = computeTarget(w, h, dt);
 
       if (disconnectedAt !== null && state.calibration.isCalibrated) {
-        target = { x: currentX ?? w / 2, y: currentY ?? h / 2, mode: 'live' };
+        target = { x: currentX ?? w / 2, y: currentY ?? h / 2, mode: 'live', targetPct: lastRenderedPct };
         renderViews();
       }
 
@@ -343,9 +505,16 @@
       if (isLive || isPreview) {
         if (currentX === null) currentX = target.x;
         if (currentY === null) currentY = target.y;
-        const smooth = isPreview ? smoothingFactor * 0.5 : smoothingFactor;
-        currentX += (target.x - currentX) * smooth;
-        currentY += (target.y - currentY) * smooth;
+
+        if (isLive && useOneEuro && target.targetPct != null) {
+          const filteredPct = stageEuro.filter(target.targetPct, now);
+          currentX = clamp(filteredPct * w, 0, w);
+          currentY = target.y;
+        } else {
+          const smooth = isPreview ? smoothingFactor * 0.5 : smoothingFactor;
+          currentX += (target.x - currentX) * smooth;
+          currentY += (target.y - currentY) * smooth;
+        }
       }
 
       let intensity = 1;
@@ -360,10 +529,24 @@
       ctx.fillRect(0, 0, w, h);
 
       if (isPreview) {
-        drawTargetLine(w, h, target.targetPct ?? 0.5);
+        drawTargetLine(w, h, target.targetPct ?? 0.5, target.targetLabel);
         drawSpot(currentX, currentY, w, h, 0.4, 0.65);
       } else if (isLive && intensity > 0) {
         drawSpot(currentX, currentY, w, h, intensity, 1);
+      }
+
+      if (isTestMode) {
+        window.__spotlightTestHook = {
+          currentX,
+          currentY,
+          lastRenderedPct,
+          fusedValue,
+          packetFusionActive,
+          stillPct,
+          orientation: { ...orientation },
+          stageOffsetPct: state && state.stageOffsetPct,
+          canvasVisible: canvas.style.display !== 'none',
+        };
       }
     }
     requestAnimationFrame(draw);
