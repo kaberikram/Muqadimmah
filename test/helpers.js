@@ -3,8 +3,7 @@ const {
   httpServer,
   io: serverIo,
   state,
-  resetCalibrationState,
-  clearOrientationBuffer,
+  SETTINGS_DEFAULTS,
 } = require('../server');
 
 let baseUrl = null;
@@ -32,27 +31,22 @@ async function startTestServer() {
 
 async function stopTestServer() {
   if (!httpServer.listening) return;
+  serverIo.disconnectSockets(true);
   await new Promise((resolve) => httpServer.close(resolve));
   baseUrl = null;
 }
 
 function resetServerState() {
   serverIo.disconnectSockets(true);
-  resetCalibrationState();
-  clearOrientationBuffer();
   state.isPhoneConnected = false;
-  state.trackingMode = 'stage';
-  state.stageOffsetPct = 0;
-  state.currentOrientation = {
-    alpha: 0,
-    beta: 90,
-    gamma: 0,
-    rotationRate: null,
-    t: null,
-    still: false,
-    omega: 0,
-    v: 1,
-  };
+  state.isCalibrated = false;
+  state.centerBeta = null;
+  state.centerGamma = null;
+  state.centerAlpha = null;
+  state.auraActive = false;
+  state.expandActive = false;
+  state.settings = { ...SETTINGS_DEFAULTS };
+  state.currentOrientation = { beta: 90, gamma: 0, alpha: 0 };
 }
 
 function connectSocket(role = 'client') {
@@ -68,66 +62,8 @@ function connectSocket(role = 'client') {
   });
 }
 
-function buildOrientationPayload({
-  alpha,
-  beta = 90,
-  gamma = 0,
-  t,
-  still,
-  omega = 0,
-  rotationRate = null,
-  v,
-  useTimestamps = true,
-}) {
-  const payload = {
-    alpha: ((alpha % 360) + 360) % 360,
-    beta,
-    gamma,
-  };
-  if (useTimestamps && typeof t === 'number') {
-    payload.t = t;
-    payload.v = 2;
-  }
-  if (still === true) payload.still = true;
-  if (typeof omega === 'number') payload.omega = omega;
-  if (rotationRate) payload.rotationRate = rotationRate;
-  if (v === 2 && !payload.v) payload.v = 2;
-  return payload;
-}
-
-async function emitSamples(phone, {
-  alpha,
-  beta = 90,
-  gamma = 0,
-  count = 50,
-  noise = 0,
-  tStart = 1000,
-  dt = 16,
-  still,
-  omega = 0,
-  rotationRate = null,
-  useTimestamps = true,
-  delayMs = 0,
-}) {
-  clearOrientationBuffer();
-  let t = tStart;
-  for (let i = 0; i < count; i++) {
-    const sampleAlpha = alpha + (Math.random() - 0.5) * 2 * noise;
-    phone.emit('orientation_update', buildOrientationPayload({
-      alpha: sampleAlpha,
-      beta,
-      gamma,
-      t: useTimestamps ? t : undefined,
-      still,
-      omega,
-      rotationRate,
-      v: useTimestamps ? 2 : 1,
-    }));
-    t += dt;
-    if (delayMs > 0) await sleep(delayMs);
-  }
-  await sleep(200);
-  return t;
+function buildOrientationPayload({ beta = 90, gamma = 0, alpha = 0, t }) {
+  return { beta, gamma, alpha, t: t ?? performance.now() };
 }
 
 async function connectPhone() {
@@ -137,20 +73,36 @@ async function connectPhone() {
   return phone;
 }
 
-async function confirmMark(operator) {
+async function calibrateCenter(phone, { beta = 90, gamma = 0, alpha = 0 } = {}) {
   return new Promise((resolve) => {
-    operator.emit('confirm_stage_position', {}, (res) => resolve(res));
+    phone.emit('calibrate_center', { beta, gamma, alpha }, resolve);
   });
 }
 
-async function calibrateStage(phone, operator, alphas) {
-  for (const alpha of alphas) {
-    await emitSamples(phone, { alpha, noise: 0.3, count: 50 });
-    const res = await confirmMark(operator);
-    if (!res || !res.ok) throw new Error(`confirm failed: ${res && res.error}`);
+async function emitOrientation(phone, { beta, gamma, alpha = 0, count = 1, tStart = 1000 }) {
+  let t = tStart;
+  for (let i = 0; i < count; i++) {
+    phone.emit('orientation_update', buildOrientationPayload({ beta, gamma, alpha, t }));
+    t += 16;
   }
+  await sleep(50);
+}
+
+function emitEffectBurst(phone) {
   return new Promise((resolve) => {
-    operator.emit('confirm_verification', {}, (res) => resolve(res));
+    phone.emit('effect_burst', {}, resolve);
+  });
+}
+
+function emitEffectExpand(phone, active) {
+  return new Promise((resolve) => {
+    phone.emit('effect_expand', { active }, resolve);
+  });
+}
+
+function emitEffectAura(phone, active) {
+  return new Promise((resolve) => {
+    phone.emit('effect_aura', { active }, resolve);
   });
 }
 
@@ -163,7 +115,7 @@ async function waitForTestHook(page, timeoutMs = 15000) {
   await page.waitForFunction(
     () => {
       const hook = window.__spotlightTestHook;
-      return hook.canvasVisible === true && typeof hook.currentX === 'number';
+      return hook.canvasVisible === true && hook.isCalibrated && typeof hook.currentX === 'number';
     },
     null,
     { timeout: timeoutMs, polling: 50 }
@@ -193,13 +145,16 @@ module.exports = {
   resetServerState,
   connectSocket,
   connectPhone,
-  emitSamples,
-  confirmMark,
-  calibrateStage,
+  calibrateCenter,
+  emitOrientation,
+  emitEffectBurst,
+  emitEffectExpand,
+  emitEffectAura,
   buildOrientationPayload,
   waitForTestHook,
   sampleCurrentX,
   peakToPeak,
   getState: () => state,
   getBaseUrl: () => baseUrl,
+  SETTINGS_DEFAULTS,
 };

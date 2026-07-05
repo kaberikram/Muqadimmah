@@ -4,41 +4,30 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <title>Gyro Spotlight — Transmitter</title>
+  <title>Gyro Spotlight — Laser Pointer</title>
   <script src="/vendor/tailwind.js"></script>
 </head>
 <body class="bg-neutral-950 text-white min-h-screen select-none touch-manipulation">
   <div class="max-w-md mx-auto px-5 py-6 flex flex-col gap-5 min-h-screen">
 
     <header class="flex items-center justify-between">
-      <h1 class="text-xl font-bold tracking-tight">Spotlight Transmitter</h1>
+      <h1 class="text-xl font-bold tracking-tight">Laser Pointer</h1>
       <div class="flex items-center gap-2">
         <span id="conn-dot" class="w-3 h-3 rounded-full bg-red-500"></span>
         <span id="conn-label" class="text-sm text-neutral-400">Offline</span>
       </div>
     </header>
 
-    <div class="grid grid-cols-2 gap-2 p-1 bg-neutral-900 rounded-xl">
-      <button id="mode-pointer"
-        class="py-3 rounded-lg text-sm font-bold bg-neutral-800 text-neutral-400 transition-colors">
-        Pointer
-      </button>
-      <button id="mode-stage"
-        class="py-3 rounded-lg text-sm font-bold bg-blue-600 transition-colors">
-        Stage Walk
-      </button>
-    </div>
-
     <div class="bg-neutral-900 rounded-2xl p-5 text-center">
-      <p class="text-neutral-400 text-sm uppercase tracking-widest mb-1">Orientation</p>
+      <p class="text-neutral-400 text-sm uppercase tracking-widest mb-1">Aim angles</p>
       <div class="grid grid-cols-2 gap-4">
         <div>
-          <p class="text-neutral-500 text-xs uppercase">Yaw</p>
-          <p id="alpha-readout" class="text-4xl font-mono font-bold tabular-nums">&mdash;</p>
+          <p class="text-neutral-500 text-xs uppercase">Pan (γ)</p>
+          <p id="gamma-readout" class="text-3xl font-mono font-bold tabular-nums">&mdash;</p>
         </div>
         <div>
-          <p class="text-neutral-500 text-xs uppercase">Pitch</p>
-          <p id="beta-readout" class="text-4xl font-mono font-bold tabular-nums">&mdash;</p>
+          <p class="text-neutral-500 text-xs uppercase">Tilt (β)</p>
+          <p id="beta-readout" class="text-3xl font-mono font-bold tabular-nums">&mdash;</p>
         </div>
       </div>
       <p id="sensor-status" class="text-neutral-500 text-sm mt-3">Sensors inactive</p>
@@ -49,34 +38,60 @@
       Activate Motion Sensors
     </button>
 
-    <div id="pointer-panel" class="hidden flex-col gap-3 opacity-40 pointer-events-none transition-opacity">
-      <p class="text-neutral-400 text-sm text-center">
-        Hold the phone like a laser pointer. Aim at the <strong class="text-white">center</strong> of the screen, then tap:
+    <div id="pointer-panel" class="hidden flex-col gap-4 opacity-40 pointer-events-none transition-opacity">
+      <p class="text-neutral-400 text-sm text-center leading-relaxed">
+        Hold phone like a <strong class="text-white">laser pointer</strong> — top edge toward screen.<br />
+        Point at center → <strong class="text-white">Calibrate</strong>. Higher reach = faster sweep.
       </p>
-      <button id="center-btn"
-        class="py-8 rounded-2xl bg-neutral-800 active:bg-neutral-700 text-xl font-bold transition-colors">
-        Set Screen Center
+
+      <button id="calibrate-btn"
+        class="w-full py-8 rounded-2xl bg-blue-600 active:bg-blue-700 text-xl font-bold transition-colors">
+        Calibrate Center
       </button>
-      <p id="pointer-status" class="text-center text-sm text-neutral-500">Point at center to calibrate</p>
-    </div>
+      <p id="calibrate-status" class="text-center text-sm text-neutral-500">
+        Point at projector center, then tap Calibrate
+      </p>
 
-    <div id="stage-panel" class="flex flex-col gap-3 opacity-40 pointer-events-none transition-opacity">
-      <div class="bg-neutral-900 rounded-xl p-4 text-sm text-neutral-400 leading-relaxed">
-        <p class="text-neutral-300 font-semibold mb-2">Pocket mode</p>
-        <ol class="list-decimal pl-5 space-y-2">
-          <li>Tap <strong class="text-white">Activate Motion Sensors</strong> below</li>
-          <li>Put phone in your pocket — <strong class="text-white">same pocket</strong> for the whole show</li>
-          <li>Follow position instructions on the <strong class="text-white">operator laptop</strong> (<code class="text-neutral-300">/operator</code>)</li>
-          <li>Operator confirms each position from the laptop — you don&rsquo;t touch the phone again</li>
-        </ol>
+      <button id="recenter-btn"
+        class="w-full py-4 rounded-2xl bg-neutral-800 active:bg-neutral-700 text-lg font-semibold transition-colors hidden">
+        Re-calibrate Center
+      </button>
+
+      <div class="bg-neutral-900 rounded-xl p-4 space-y-4">
+        <div>
+          <label for="sens-x-slider" class="text-sm text-neutral-400 block mb-2">
+            Horizontal reach — <span id="sens-x-value" class="text-white font-mono">58</span>
+            <span class="text-neutral-600 text-xs"> (higher = faster)</span>
+          </label>
+          <input id="sens-x-slider" type="range" min="20" max="120" step="1" value="58" class="w-full accent-blue-500" />
+        </div>
+        <div>
+          <label for="sens-y-slider" class="text-sm text-neutral-400 block mb-2">
+            Vertical reach — <span id="sens-y-value" class="text-white font-mono">52</span>
+            <span class="text-neutral-600 text-xs"> (higher = faster)</span>
+          </label>
+          <input id="sens-y-slider" type="range" min="20" max="120" step="1" value="52" class="w-full accent-blue-500" />
+        </div>
       </div>
-      <p id="stage-status" class="text-center text-sm text-neutral-500">Activate sensors, then pocket the phone</p>
-    </div>
 
-    <button id="recalibrate-btn"
-      class="w-full py-3 rounded-xl bg-neutral-900 text-neutral-400 text-sm font-semibold hidden">
-      Recalibrate
-    </button>
+      <div id="effects-panel" class="hidden flex-col gap-3">
+        <p class="text-neutral-400 text-sm text-center uppercase tracking-widest">Effects</p>
+        <div class="grid grid-cols-3 gap-2">
+          <button id="burst-btn" type="button"
+            class="py-5 rounded-2xl bg-amber-600 active:bg-amber-700 font-bold text-sm leading-tight touch-manipulation">
+            Burst
+          </button>
+          <button id="expand-btn" type="button"
+            class="py-5 rounded-2xl bg-violet-600 active:bg-violet-700 font-bold text-sm leading-tight touch-manipulation select-none">
+            Expand<br /><span class="text-xs font-normal opacity-80">hold</span>
+          </button>
+          <button id="aura-btn" type="button"
+            class="py-5 rounded-2xl bg-cyan-700 active:bg-cyan-800 font-bold text-sm leading-tight touch-manipulation">
+            Aura
+          </button>
+        </div>
+      </div>
+    </div>
 
     <details class="mt-auto">
       <summary class="text-neutral-500 text-sm cursor-pointer py-2">Event log</summary>
@@ -92,49 +107,36 @@
 
     const connDot = document.getElementById('conn-dot');
     const connLabel = document.getElementById('conn-label');
-    const alphaReadout = document.getElementById('alpha-readout');
+    const gammaReadout = document.getElementById('gamma-readout');
     const betaReadout = document.getElementById('beta-readout');
     const sensorStatus = document.getElementById('sensor-status');
     const activateBtn = document.getElementById('activate-btn');
-    const modePointerBtn = document.getElementById('mode-pointer');
-    const modeStageBtn = document.getElementById('mode-stage');
     const pointerPanel = document.getElementById('pointer-panel');
-    const stagePanel = document.getElementById('stage-panel');
-    const centerBtn = document.getElementById('center-btn');
-    const recalibrateBtn = document.getElementById('recalibrate-btn');
-    const pointerStatus = document.getElementById('pointer-status');
-    const stageStatus = document.getElementById('stage-status');
+    const calibrateBtn = document.getElementById('calibrate-btn');
+    const calibrateStatus = document.getElementById('calibrate-status');
+    const recenterBtn = document.getElementById('recenter-btn');
+    const sensXSlider = document.getElementById('sens-x-slider');
+    const sensYSlider = document.getElementById('sens-y-slider');
+    const sensXValue = document.getElementById('sens-x-value');
+    const sensYValue = document.getElementById('sens-y-value');
     const logEl = document.getElementById('log');
-
-    const ACCEL_BUF_SIZE = 32;
-    const ALPHA_EMA = 0.2;
+    const effectsPanel = document.getElementById('effects-panel');
+    const burstBtn = document.getElementById('burst-btn');
+    const expandBtn = document.getElementById('expand-btn');
+    const auraBtn = document.getElementById('aura-btn');
 
     let sensorsActive = false;
-    let trackingMode = 'stage';
-    let currentOrientation = null;
     let wakeLock = null;
-    let smoothedAlpha = null;
-    let latestRotationRate = null;
-    let latestMotionT = 0;
-    let latestOmega = 0;
-    let isStill = false;
-    let stillEnterStart = null;
+    let currentOrientation = null;
+    let smoothedBeta = null;
+    let smoothedGamma = null;
+    let isCalibrated = false;
+    let auraActive = false;
     let orientSource = 'none';
-    const accelMagBuf = [];
-
-    let stillAccelVarEnter = 0.05;
-    let stillAccelVarExit = 0.15;
-    let stillGyroEnterDps = 8;
-    let stillGyroExitDps = 20;
-    let stillEnterMs = 400;
-
-    function angleDiff(a, b) {
-      return ((a - b + 540) % 360) - 180;
-    }
-
-    function emaAngle(prev, next, factor) {
-      return (prev + angleDiff(next, prev) * factor + 360) % 360;
-    }
+    let emaGamma = 0.65;
+    let emaBeta = 0.6;
+    let pendingOrientation = null;
+    let emitFrameScheduled = false;
 
     function log(msg) {
       const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
@@ -149,52 +151,52 @@
 
     function applySettings(settings) {
       if (!settings) return;
-      stillAccelVarEnter = settings.stillAccelVarEnter ?? stillAccelVarEnter;
-      stillAccelVarExit = settings.stillAccelVarExit ?? stillAccelVarExit;
-      stillGyroEnterDps = settings.stillGyroEnterDps ?? stillGyroEnterDps;
-      stillGyroExitDps = settings.stillGyroExitDps ?? stillGyroExitDps;
-      stillEnterMs = settings.stillEnterMs ?? stillEnterMs;
+      emaGamma = settings.orientationEmaGamma ?? emaGamma;
+      emaBeta = settings.orientationEmaBeta ?? emaBeta;
+      sensXSlider.value = String(settings.pointerSensitivityX ?? 58);
+      sensYSlider.value = String(settings.pointerSensitivityY ?? 52);
+      sensXValue.textContent = sensXSlider.value;
+      sensYValue.textContent = sensYSlider.value;
     }
 
-    function accelVariance() {
-      if (accelMagBuf.length < 8) return Infinity;
-      const mean = accelMagBuf.reduce((a, b) => a + b, 0) / accelMagBuf.length;
-      return accelMagBuf.reduce((s, v) => s + (v - mean) ** 2, 0) / accelMagBuf.length;
+    function haptic(ms = 12) {
+      if (navigator.vibrate) navigator.vibrate(ms);
     }
 
-    function updateStillness() {
-      const var_ = accelVariance();
-      const now = performance.now();
-      if (!isStill) {
-        if (var_ < stillAccelVarEnter && latestOmega < stillGyroEnterDps) {
-          if (stillEnterStart === null) stillEnterStart = now;
-          if (now - stillEnterStart >= stillEnterMs) isStill = true;
-        } else {
-          stillEnterStart = null;
-        }
-      } else if (var_ > stillAccelVarExit || latestOmega > stillGyroExitDps) {
-        isStill = false;
-        stillEnterStart = null;
+    function renderCalState() {
+      if (isCalibrated) {
+        calibrateBtn.innerHTML = '&#10003; Center Calibrated';
+        calibrateBtn.className = 'w-full py-6 rounded-2xl bg-green-600 text-xl font-bold transition-colors';
+        calibrateStatus.textContent = 'Aim to move spotlight — tap Re-calibrate if drift appears';
+        calibrateStatus.className = 'text-center text-sm text-green-400 font-semibold';
+        recenterBtn.classList.remove('hidden');
+        effectsPanel.classList.remove('hidden');
+        effectsPanel.classList.add('flex');
+      } else {
+        calibrateBtn.textContent = 'Calibrate Center';
+        calibrateBtn.className = 'w-full py-8 rounded-2xl bg-blue-600 active:bg-blue-700 text-xl font-bold transition-colors';
+        calibrateStatus.textContent = 'Point at projector center, then tap Calibrate';
+        calibrateStatus.className = 'text-center text-sm text-neutral-500';
+        recenterBtn.classList.add('hidden');
+        effectsPanel.classList.add('hidden');
+        effectsPanel.classList.remove('flex');
+      }
+      renderAuraBtn();
+    }
+
+    function renderAuraBtn() {
+      if (auraActive) {
+        auraBtn.className = 'py-5 rounded-2xl bg-cyan-500 ring-2 ring-cyan-300 font-bold text-sm leading-tight touch-manipulation';
+        auraBtn.textContent = 'Aura ON';
+      } else {
+        auraBtn.className = 'py-5 rounded-2xl bg-cyan-700 active:bg-cyan-800 font-bold text-sm leading-tight touch-manipulation';
+        auraBtn.textContent = 'Aura';
       }
     }
 
-    function renderModeButtons() {
-      const isPointer = trackingMode === 'pointer';
-      modePointerBtn.className = isPointer
-        ? 'py-3 rounded-lg text-sm font-bold bg-blue-600 transition-colors'
-        : 'py-3 rounded-lg text-sm font-bold bg-neutral-800 text-neutral-400 transition-colors';
-      modeStageBtn.className = isPointer
-        ? 'py-3 rounded-lg text-sm font-bold bg-neutral-800 text-neutral-400 transition-colors'
-        : 'py-3 rounded-lg text-sm font-bold bg-blue-600 transition-colors';
-      pointerPanel.classList.toggle('hidden', !isPointer);
-      pointerPanel.classList.toggle('flex', isPointer);
-      stagePanel.classList.toggle('hidden', isPointer);
-      stagePanel.classList.toggle('flex', !isPointer);
-    }
-
-    function enableCalibrationPanel() {
-      pointerPanel.classList.remove('opacity-40', 'pointer-events-none');
-      stagePanel.classList.remove('opacity-40', 'pointer-events-none');
+    function enablePointerPanel() {
+      pointerPanel.classList.remove('hidden', 'opacity-40', 'pointer-events-none');
+      pointerPanel.classList.add('flex');
     }
 
     socket.on('connect', () => {
@@ -211,131 +213,62 @@
     socket.on('connect_error', (err) => log(`Socket error: ${err.message}`));
 
     socket.on('state_update', (s) => {
-      trackingMode = s.trackingMode || 'stage';
+      isCalibrated = s.isCalibrated;
+      auraActive = !!s.auraActive;
       applySettings(s.settings);
-      renderModeButtons();
-      renderCalibration(s);
+      renderCalState();
     });
     socket.on('init', ({ state: s }) => {
-      trackingMode = s.trackingMode || 'stage';
+      isCalibrated = s.isCalibrated;
+      auraActive = !!s.auraActive;
       applySettings(s.settings);
-      renderModeButtons();
-      renderCalibration(s);
+      renderCalState();
     });
-
-    function renderCalibration(state) {
-      const cal = state.calibration;
-      const isPointer = state.trackingMode === 'pointer';
-
-      recalibrateBtn.classList.toggle('hidden', !isPointer || !cal.isCalibrated);
-
-      if (isPointer) {
-        if (cal.isCalibrated && cal.centerAlpha !== null) {
-          centerBtn.innerHTML =
-            `&#10003; Center Set<br /><span class="text-sm font-normal">β ${cal.centerBeta.toFixed(1)}° γ ${(cal.centerGamma ?? 0).toFixed(1)}°</span>`;
-          centerBtn.className = 'py-8 rounded-2xl bg-green-600 text-xl font-bold transition-colors';
-          centerBtn.disabled = true;
-          pointerStatus.textContent = 'Calibrated — aim to move the spotlight';
-          pointerStatus.className = 'text-center text-sm text-green-400 font-semibold';
-        } else {
-          centerBtn.textContent = 'Set Screen Center';
-          centerBtn.className = 'py-8 rounded-2xl bg-neutral-800 active:bg-neutral-700 text-xl font-bold transition-colors';
-          centerBtn.disabled = false;
-          pointerStatus.textContent = 'Point at center to calibrate';
-          pointerStatus.className = 'text-center text-sm text-neutral-500';
-        }
-        return;
-      }
-
-      const phase = cal.phase;
-      const points = cal.points || [];
-      const total = points.length || 4;
-      const current = cal.currentStep ?? 0;
-
-      if (phase === 'live' || cal.isCalibrated) {
-        stageStatus.textContent =
-          `Live — ${cal.mappingAxis} (${cal.qualitySpan.toFixed(1)}° range). Keep facing audience center.`;
-        stageStatus.className = 'text-center text-sm text-green-400 font-semibold';
-      } else if (phase === 'verify') {
-        stageStatus.textContent = 'Verification walk — slowly cross the stage, watch the projector';
-        stageStatus.className = 'text-center text-sm text-blue-400 font-semibold';
-      } else if (cal.error) {
-        stageStatus.textContent = cal.error;
-        stageStatus.className = 'text-center text-sm text-yellow-400';
-      } else if (sensorsActive && phase === 'marks' && current < total) {
-        const label = points[current]?.label || 'next mark';
-        stageStatus.textContent = `Stand at: ${label} — operator confirms on laptop (${current + 1}/${total})`;
-        stageStatus.className = 'text-center text-sm text-blue-400 font-semibold';
-      } else if (sensorsActive) {
-        stageStatus.textContent = 'Phone in pocket — follow the operator laptop';
-        stageStatus.className = 'text-center text-sm text-neutral-400';
-      } else {
-        stageStatus.textContent = 'Activate sensors, then pocket the phone';
-        stageStatus.className = 'text-center text-sm text-neutral-500';
-      }
-    }
 
     function emitOrientation() {
       if (!currentOrientation || !socket.connected) return;
-      socket.volatile.emit('orientation_update', {
+      socket.emit('orientation_update', {
         alpha: currentOrientation.alpha,
         beta: currentOrientation.beta,
         gamma: currentOrientation.gamma,
-        rotationRate: latestRotationRate,
-        t: latestMotionT || performance.now(),
-        still: isStill,
-        omega: round1(latestOmega),
-        v: 2,
+        t: performance.now(),
       });
     }
 
-    function handleMotion(event) {
-      const accel = event.acceleration || event.accelerationIncludingGravity;
-      if (accel && typeof accel.x === 'number') {
-        accelMagBuf.push(Math.hypot(accel.x, accel.y, accel.z));
-        if (accelMagBuf.length > ACCEL_BUF_SIZE) accelMagBuf.shift();
-      }
-
-      const rr = event.rotationRate;
-      if (rr) {
-        latestRotationRate = {
-          alpha: round1(rr.alpha),
-          beta: round1(rr.beta),
-          gamma: round1(rr.gamma),
-        };
-        latestOmega = Math.hypot(rr.alpha, rr.beta, rr.gamma);
-      }
-
-      if (typeof event.timeStamp === 'number' && Number.isFinite(event.timeStamp)) {
-        latestMotionT = event.timeStamp;
-      }
-
-      updateStillness();
-      if (currentOrientation) emitOrientation();
+    function scheduleOrientationEmit() {
+      if (emitFrameScheduled) return;
+      emitFrameScheduled = true;
+      requestAnimationFrame(() => {
+        emitFrameScheduled = false;
+        if (!pendingOrientation) return;
+        currentOrientation = pendingOrientation;
+        emitOrientation();
+      });
     }
 
     function handleOrientation(event) {
-      let alpha = null;
-      if (typeof event.webkitCompassHeading === 'number' && !Number.isNaN(event.webkitCompassHeading)) {
-        alpha = event.webkitCompassHeading;
-      } else if (typeof event.alpha === 'number' && event.alpha !== null) {
-        alpha = event.alpha;
-      }
-      if (alpha === null || typeof event.beta !== 'number' || event.beta === null) return;
+      if (typeof event.beta !== 'number' || event.beta === null) return;
       if (typeof event.gamma !== 'number' || event.gamma === null) return;
 
-      const rawAlpha = round1(((alpha % 360) + 360) % 360);
-      const rawBeta = round1(event.beta);
-      const rawGamma = round1(event.gamma);
-      smoothedAlpha = smoothedAlpha === null
-        ? rawAlpha
-        : round1(emaAngle(smoothedAlpha, rawAlpha, ALPHA_EMA));
+      const rawBeta = event.beta;
+      const rawGamma = event.gamma;
+      smoothedBeta = smoothedBeta === null
+        ? rawBeta
+        : smoothedBeta + (rawBeta - smoothedBeta) * emaBeta;
+      smoothedGamma = smoothedGamma === null
+        ? rawGamma
+        : smoothedGamma + (rawGamma - smoothedGamma) * emaGamma;
 
-      currentOrientation = { alpha: smoothedAlpha, beta: rawBeta, gamma: rawGamma };
-      alphaReadout.textContent = smoothedAlpha.toFixed(1) + '°';
-      betaReadout.textContent = rawBeta.toFixed(1) + '°';
+      const beta = smoothedBeta;
+      const gamma = smoothedGamma;
+      const alpha = typeof event.alpha === 'number' && event.alpha !== null
+        ? round1(((event.alpha % 360) + 360) % 360)
+        : 0;
 
-      emitOrientation();
+      pendingOrientation = { alpha, beta, gamma };
+      gammaReadout.textContent = `${gamma.toFixed(1)}°`;
+      betaReadout.textContent = `${beta.toFixed(1)}°`;
+      scheduleOrientationEmit();
     }
 
     async function acquireWakeLock() {
@@ -343,7 +276,7 @@
       try {
         wakeLock = await navigator.wakeLock.request('screen');
         wakeLock.addEventListener('release', () => log('Wake lock released'));
-        log('Wake lock acquired — screen will stay on');
+        log('Wake lock acquired');
       } catch (err) {
         log(`Wake lock failed: ${err.message}`);
       }
@@ -358,25 +291,16 @@
             typeof DeviceOrientationEvent.requestPermission === 'function') {
           const result = await DeviceOrientationEvent.requestPermission();
           if (result !== 'granted') {
-            log(`Motion permission ${result}`);
+            log(`Orientation permission ${result}`);
             sensorStatus.textContent = 'Permission denied — check Safari settings';
             sensorStatus.className = 'text-red-400 text-sm mt-3';
             return;
           }
         }
 
-        if (typeof DeviceMotionEvent !== 'undefined' &&
-            typeof DeviceMotionEvent.requestPermission === 'function') {
-          const motionResult = await DeviceMotionEvent.requestPermission();
-          if (motionResult !== 'granted') {
-            log(`Device motion permission ${motionResult} — gyro assist disabled`);
-          }
-        }
-
         const useAbsolute = 'ondeviceorientationabsolute' in window;
         orientSource = useAbsolute ? 'deviceorientationabsolute' : 'deviceorientation';
         window.addEventListener(orientSource, handleOrientation);
-        window.addEventListener('devicemotion', handleMotion);
         log(`Orientation source: ${orientSource}`);
 
         sensorsActive = true;
@@ -386,14 +310,11 @@
         activateBtn.textContent = '✓ Sensors Active';
         activateBtn.className = 'w-full py-6 rounded-2xl bg-green-600 text-2xl font-bold shadow-lg';
         activateBtn.disabled = true;
-        sensorStatus.textContent = `Streaming (${orientSource})…`;
+        sensorStatus.textContent = 'Point at screen center to calibrate';
         sensorStatus.className = 'text-green-400 text-sm mt-3';
-        enableCalibrationPanel();
-        if (trackingMode === 'stage') {
-          stageStatus.textContent = 'Put phone in pocket — follow operator laptop';
-          stageStatus.className = 'text-center text-sm text-blue-400 font-semibold';
-        }
-        log('Sensors activated — pocket the phone for stage mode');
+        enablePointerPanel();
+        renderCalState();
+        log('Ready — point at center, tap Calibrate Center');
       } catch (err) {
         log(`Activation failed: ${err.message}`);
         sensorStatus.textContent = 'Activation failed — see event log';
@@ -401,40 +322,79 @@
       }
     });
 
-    function switchMode(mode) {
-      if (mode === trackingMode) return;
-      trackingMode = mode;
-      socket.emit('set_tracking_mode', mode);
-      renderModeButtons();
-      log(`Mode → ${mode}`);
-    }
-
-    modePointerBtn.addEventListener('click', () => switchMode('pointer'));
-    modeStageBtn.addEventListener('click', () => switchMode('stage'));
-
-    centerBtn.addEventListener('click', () => {
-      if (!currentOrientation) {
-        log('No sensor reading yet — move the phone a little and retry');
-        pointerStatus.textContent = 'No reading yet — sensors warming up';
-        pointerStatus.className = 'text-center text-sm text-yellow-400';
+    function calibrateCenter() {
+      const aim = pendingOrientation || currentOrientation;
+      if (!aim) {
+        calibrateStatus.textContent = 'No reading yet — move the phone slightly';
+        calibrateStatus.className = 'text-center text-sm text-yellow-400';
         return;
       }
-      centerBtn.disabled = true;
-      socket.emit('calibrate_center', currentOrientation, (res) => {
+      calibrateBtn.disabled = true;
+      socket.emit('calibrate_center', aim, (res) => {
+        calibrateBtn.disabled = false;
         if (res && res.ok === false && res.error) {
-          log(`Calibration rejected: ${res.error}`);
-          pointerStatus.textContent = res.error;
-          pointerStatus.className = 'text-center text-sm text-yellow-400';
-          centerBtn.disabled = false;
-        } else {
-          log(`Center = α ${currentOrientation.alpha.toFixed(1)}° β ${currentOrientation.beta.toFixed(1)}°`);
+          log(`Calibrate rejected: ${res.error}`);
+          calibrateStatus.textContent = res.error;
+          calibrateStatus.className = 'text-center text-sm text-yellow-400';
+          return;
         }
+        isCalibrated = true;
+        log(`Center = β ${aim.beta.toFixed(1)}° γ ${aim.gamma.toFixed(1)}°`);
+        renderCalState();
+      });
+    }
+
+    calibrateBtn.addEventListener('click', calibrateCenter);
+    recenterBtn.addEventListener('click', calibrateCenter);
+
+    function updateSetting(key, value, labelEl, displayValue) {
+      labelEl.textContent = displayValue;
+      socket.emit('update_settings', { key, value }, (res) => {
+        if (res && res.ok) log(`${key} → ${displayValue}`);
+      });
+    }
+
+    sensXSlider.addEventListener('input', () => {
+      const value = parseInt(sensXSlider.value, 10);
+      updateSetting('pointerSensitivityX', value, sensXValue, String(value));
+    });
+    sensYSlider.addEventListener('input', () => {
+      const value = parseInt(sensYSlider.value, 10);
+      updateSetting('pointerSensitivityY', value, sensYValue, String(value));
+    });
+
+    burstBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      haptic(20);
+      socket.emit('effect_burst', {}, (res) => {
+        if (res && res.ok) log('Burst!');
       });
     });
 
-    recalibrateBtn.addEventListener('click', () => {
-      socket.emit('reset_calibration');
-      log('Calibration reset');
+    function setExpand(active) {
+      expandBtn.classList.toggle('ring-2', active);
+      expandBtn.classList.toggle('ring-violet-300', active);
+      expandBtn.classList.toggle('bg-violet-500', active);
+      expandBtn.classList.toggle('bg-violet-600', !active);
+      socket.emit('effect_expand', { active });
+    }
+
+    expandBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      haptic(8);
+      setExpand(true);
+    });
+    expandBtn.addEventListener('pointerup', () => setExpand(false));
+    expandBtn.addEventListener('pointercancel', () => setExpand(false));
+    expandBtn.addEventListener('pointerleave', () => setExpand(false));
+
+    auraBtn.addEventListener('click', () => {
+      auraActive = !auraActive;
+      haptic(15);
+      renderAuraBtn();
+      socket.emit('effect_aura', { active: auraActive }, (res) => {
+        if (res && res.ok) log(`Aura ${auraActive ? 'on' : 'off'}`);
+      });
     });
   </script>
 </body>

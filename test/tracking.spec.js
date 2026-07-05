@@ -5,15 +5,18 @@ const {
   resetServerState,
   connectPhone,
   connectSocket,
-  emitSamples,
-  calibrateStage,
-  buildOrientationPayload,
+  calibrateCenter,
+  emitOrientation,
+  emitEffectBurst,
+  emitEffectExpand,
+  emitEffectAura,
   waitForTestHook,
   sampleCurrentX,
   peakToPeak,
   sleep,
-  getState,
   getBaseUrl,
+  getState,
+  SETTINGS_DEFAULTS,
 } = require('./helpers');
 
 test.beforeAll(async () => {
@@ -28,203 +31,174 @@ test.beforeEach(() => {
   resetServerState();
 });
 
-test('calibration across 0/360 seam picks alpha axis with ~40° span', async () => {
+test('absolute aim moves spotlight when gamma changes after calibration', async ({ page }) => {
   const phone = await connectPhone();
-  const operator = await connectSocket('operator');
-
-  const alphas = [340, 355, 5, 20];
-  for (const alpha of alphas) {
-    await emitSamples(phone, { alpha, noise: 0.3, count: 50 });
-    await new Promise((resolve) => {
-      operator.emit('confirm_stage_position', {}, resolve);
-    });
-  }
-
-  const cal = getState().calibration;
-  expect(cal.phase).toBe('verify');
-  expect(cal.mappingAxis).toBe('alpha');
-  expect(cal.qualitySpan).toBeGreaterThan(35);
-  expect(cal.qualitySpan).toBeLessThan(45);
-
-  phone.disconnect();
-  operator.disconnect();
-});
-
-test('stillness clamp holds spotlight steady when still', async ({ page }) => {
-  const phone = await connectPhone();
-  const operator = await connectSocket('operator');
-
-  await calibrateStage(phone, operator, [340, 355, 5, 20]);
-  expect(getState().calibration.phase).toBe('live');
-
-  await emitSamples(phone, { alpha: 5, count: 30, tStart: 5000 });
+  await calibrateCenter(phone, { beta: 90, gamma: 0 });
   await page.goto(`${getBaseUrl()}/?test=1`);
   await waitForTestHook(page);
 
-  await emitSamples(phone, {
-    alpha: 5,
-    noise: 0.8,
-    count: 200,
-    still: true,
-    omega: 0,
-    tStart: 5000,
-    dt: 16,
-  });
-  await sleep(500);
-
-  const xs = await sampleCurrentX(page, 3000);
-  expect(peakToPeak(xs)).toBeLessThan(2);
-
-  phone.disconnect();
-  operator.disconnect();
-});
-
-test('walk lag stays under ~150 ms with truthful timestamps', async ({ page }) => {
-  const phone = await connectPhone();
-  const operator = await connectSocket('operator');
-
-  await calibrateStage(phone, operator, [340, 355, 5, 20]);
-  await emitSamples(phone, { alpha: 10, count: 30, tStart: 8000 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-
-  const durationMs = 3000;
-  const steps = 180;
-  const dt = durationMs / steps;
-  let t = 10000;
-  const startAlpha = 340;
-  const endAlpha = 20;
-
-  for (let i = 0; i <= steps; i++) {
-    const frac = i / steps;
-    let alpha = startAlpha + frac * ((endAlpha - startAlpha + 360) % 360);
-    if (alpha >= 360) alpha -= 360;
-    const rate = ((endAlpha - startAlpha + 360) % 360) / (durationMs / 1000);
-    phone.emit('orientation_update', buildOrientationPayload({
-      alpha,
-      t,
-      omega: Math.abs(rate),
-      rotationRate: { alpha: rate, beta: 0, gamma: 0 },
-      v: 2,
-    }));
-    t += dt;
-    await sleep(0);
-  }
-
-  await sleep(400);
-
-  const hook = await page.evaluate(() => window.__spotlightTestHook);
-  const w = 1280;
-  const expectedPct = 1;
-  const expectedX = expectedPct * w;
-  const lagPx = Math.abs(hook.currentX - expectedX);
-  const lagMs = (lagPx / w) * durationMs;
-  expect(lagMs).toBeLessThan(200);
-
-  phone.disconnect();
-  operator.disconnect();
-});
-
-test('WiFi jitter immunity matches truthful packet timestamps', async ({ page }) => {
-  const phone = await connectPhone();
-  const operator = await connectSocket('operator');
-
-  await calibrateStage(phone, operator, [340, 355, 5, 20]);
-  await emitSamples(phone, { alpha: 10, count: 30, tStart: 8000 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-
-  const durationMs = 3000;
-  const steps = 120;
-  const dt = durationMs / steps;
-  let t = 20000;
-  const startAlpha = 340;
-  const endAlpha = 20;
-
-  for (let i = 0; i <= steps; i++) {
-    const frac = i / steps;
-    let alpha = startAlpha + frac * ((endAlpha - startAlpha + 360) % 360);
-    if (alpha >= 360) alpha -= 360;
-    const rate = ((endAlpha - startAlpha + 360) % 360) / (durationMs / 1000);
-    phone.emit('orientation_update', buildOrientationPayload({
-      alpha,
-      t,
-      omega: Math.abs(rate),
-      rotationRate: { alpha: rate, beta: 0, gamma: 0 },
-      v: 2,
-    }));
-    t += dt;
-    await sleep(Math.random() * 120);
-  }
-
-  await sleep(400);
-
-  const hook = await page.evaluate(() => window.__spotlightTestHook);
-  const w = 1280;
-  const expectedX = w;
-  const lagPx = Math.abs(hook.currentX - expectedX);
-  const lagMs = (lagPx / w) * durationMs;
-  expect(lagMs).toBeLessThan(250);
-
-  phone.disconnect();
-  operator.disconnect();
-});
-
-test('v1 compat tracks without timestamps or still flag', async ({ page }) => {
-  const phone = await connectPhone();
-  const operator = await connectSocket('operator');
-
-  await calibrateStage(phone, operator, [340, 355, 5, 20]);
-  await emitSamples(phone, { alpha: 10, count: 30, tStart: 8000 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-
-  for (let i = 0; i <= 60; i++) {
-    const alpha = 340 + (i / 60) * 40;
-    phone.emit('orientation_update', buildOrientationPayload({
-      alpha: alpha > 360 ? alpha - 360 : alpha,
-      useTimestamps: false,
-    }));
-    await sleep(16);
-  }
-
-  await sleep(500);
-  const hook = await page.evaluate(() => window.__spotlightTestHook);
-  expect(hook.currentX).toBeGreaterThan(640);
-
-  phone.disconnect();
-  operator.disconnect();
-});
-
-test('drift correction nudge and anchor shift projector position', async ({ page }) => {
-  const phone = await connectPhone();
-  const operator = await connectSocket('operator');
-
-  await calibrateStage(phone, operator, [340, 355, 5, 20]);
-  await emitSamples(phone, { alpha: 5, count: 30, tStart: 30000 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
+  await emitOrientation(phone, { beta: 90, gamma: 8, count: 30 });
   await sleep(200);
 
-  const before = await page.evaluate(() => window.__spotlightTestHook.currentX);
-
-  await new Promise((resolve) => {
-    operator.emit('nudge_stage_offset', { deltaPct: 0.05 }, resolve);
-  });
-  await sleep(300);
-
-  const afterNudge = await page.evaluate(() => window.__spotlightTestHook.currentX);
-  expect(afterNudge - before).toBeGreaterThan(50);
-
-  await emitSamples(phone, { alpha: 5, count: 20, tStart: 40000 });
-  await new Promise((resolve) => {
-    operator.emit('anchor_stage_center', {}, resolve);
-  });
-  await sleep(300);
-
-  const offset = getState().stageOffsetPct;
-  expect(Math.abs(offset)).toBeLessThan(0.26);
+  const hook = await page.evaluate(() => window.__spotlightTestHook);
+  const expectedOffset = 8 * SETTINGS_DEFAULTS.pointerSensitivityX;
+  expect(hook.currentX).toBeLessThan(640 - expectedOffset * 0.7);
 
   phone.disconnect();
-  operator.disconnect();
+});
+
+test('calibrate center snaps spotlight to screen center', async ({ page }) => {
+  const phone = await connectPhone();
+  await emitOrientation(phone, { beta: 90, gamma: 10, count: 20 });
+  await calibrateCenter(phone, { beta: 90, gamma: 10 });
+  await page.goto(`${getBaseUrl()}/?test=1`);
+  await waitForTestHook(page);
+  await emitOrientation(phone, { beta: 90, gamma: 10, count: 30 });
+  await sleep(200);
+
+  const hook = await page.evaluate(() => window.__spotlightTestHook);
+  expect(hook.pointerX).toBeCloseTo(0.5, 1);
+  expect(hook.currentX).toBeGreaterThan(600);
+  expect(hook.currentX).toBeLessThan(680);
+
+  phone.disconnect();
+});
+
+test('steady aim keeps spotlight stable', async ({ page }) => {
+  const phone = await connectPhone();
+  await calibrateCenter(phone, { beta: 90, gamma: 0 });
+  await page.goto(`${getBaseUrl()}/?test=1`);
+  await waitForTestHook(page);
+
+  await emitOrientation(phone, { beta: 90, gamma: 0, count: 120 });
+  await sleep(200);
+
+  const xs = await sampleCurrentX(page, 1500);
+  expect(peakToPeak(xs)).toBeLessThan(5);
+
+  phone.disconnect();
+});
+
+test('higher horizontal sensitivity increases movement', async ({ page }) => {
+  const phone = await connectPhone();
+  const client = await connectSocket('client');
+
+  await new Promise((resolve) => {
+    client.emit('update_settings', { key: 'pointerSensitivityX', value: 100 }, resolve);
+  });
+  await calibrateCenter(phone, { beta: 90, gamma: 0 });
+  await page.goto(`${getBaseUrl()}/?test=1`);
+  await waitForTestHook(page);
+
+  await emitOrientation(phone, { beta: 90, gamma: 5, count: 30 });
+  await sleep(200);
+
+  const hook = await page.evaluate(() => window.__spotlightTestHook);
+  const defaultOffset = 5 * SETTINGS_DEFAULTS.pointerSensitivityX;
+  const highOffset = 5 * 100;
+  expect(640 - hook.currentX).toBeGreaterThan(defaultOffset * 1.5);
+  expect(640 - hook.currentX).toBeGreaterThan(highOffset * 0.7);
+
+  phone.disconnect();
+  client.disconnect();
+});
+
+test('vertical tilt moves spotlight vertically', async ({ page }) => {
+  const phone = await connectPhone();
+  await calibrateCenter(phone, { beta: 90, gamma: 0 });
+  await page.goto(`${getBaseUrl()}/?test=1`);
+  await waitForTestHook(page);
+
+  await emitOrientation(phone, { beta: 95, gamma: 0, count: 30 });
+  await sleep(200);
+
+  const hook = await page.evaluate(() => window.__spotlightTestHook);
+  expect(hook.currentY).toBeLessThan(360 - 5 * SETTINGS_DEFAULTS.pointerSensitivityY * 0.5);
+
+  phone.disconnect();
+});
+
+test('vertical pitch does not drift horizontally when euler axes couple', async ({ page }) => {
+  const phone = await connectPhone();
+  await calibrateCenter(phone, { beta: 75, gamma: 2, alpha: 30 });
+  await page.goto(`${getBaseUrl()}/?test=1`);
+  await waitForTestHook(page);
+
+  // Pure pitch up (+5°): beta rises, gamma barely changes — old code treated gamma drift as pan
+  await emitOrientation(phone, { beta: 80, gamma: 0.5, alpha: 32, count: 40 });
+  await sleep(400);
+
+  const hook = await page.evaluate(() => window.__spotlightTestHook);
+  expect(hook.currentY).toBeLessThan(360 - 20);
+  expect(hook.currentX).toBeGreaterThan(600);
+  expect(hook.currentX).toBeLessThan(680);
+
+  phone.disconnect();
+});
+
+test('burst spawns and expires on projector', async ({ page }) => {
+  const phone = await connectPhone();
+  await calibrateCenter(phone, { beta: 90, gamma: 0 });
+  await page.goto(`${getBaseUrl()}/?test=1`);
+  await waitForTestHook(page);
+  await emitOrientation(phone, { beta: 90, gamma: 0, count: 10 });
+
+  await emitEffectBurst(phone);
+  await sleep(100);
+
+  let hook = await page.evaluate(() => window.__spotlightTestHook);
+  expect(hook.activeBurstCount).toBeGreaterThan(0);
+
+  await sleep(1300);
+  hook = await page.evaluate(() => window.__spotlightTestHook);
+  expect(hook.activeBurstCount).toBe(0);
+
+  phone.disconnect();
+});
+
+test('expand hold increases radius scale then releases', async ({ page }) => {
+  const phone = await connectPhone();
+  await calibrateCenter(phone, { beta: 90, gamma: 0 });
+  await page.goto(`${getBaseUrl()}/?test=1`);
+  await waitForTestHook(page);
+  await emitOrientation(phone, { beta: 90, gamma: 0, count: 10 });
+
+  await emitEffectExpand(phone, true);
+  await sleep(350);
+
+  let hook = await page.evaluate(() => window.__spotlightTestHook);
+  expect(hook.radiusScale).toBeGreaterThan(1.5);
+  expect(hook.expandActive).toBe(true);
+
+  await emitEffectExpand(phone, false);
+  await sleep(500);
+
+  hook = await page.evaluate(() => window.__spotlightTestHook);
+  expect(hook.radiusScale).toBeLessThan(1.4);
+  expect(hook.expandActive).toBe(false);
+
+  phone.disconnect();
+});
+
+test('aura toggle updates projector and server state', async ({ page }) => {
+  const phone = await connectPhone();
+  await calibrateCenter(phone, { beta: 90, gamma: 0 });
+  await page.goto(`${getBaseUrl()}/?test=1`);
+  await waitForTestHook(page);
+
+  await emitEffectAura(phone, true);
+  await sleep(100);
+
+  let hook = await page.evaluate(() => window.__spotlightTestHook);
+  expect(hook.auraActive).toBe(true);
+  expect(getState().auraActive).toBe(true);
+
+  await emitEffectAura(phone, false);
+  await sleep(100);
+
+  hook = await page.evaluate(() => window.__spotlightTestHook);
+  expect(hook.auraActive).toBe(false);
+  expect(getState().auraActive).toBe(false);
+
+  phone.disconnect();
 });

@@ -38,7 +38,6 @@
     }
     .overlay h1 { font-size: clamp(1.5rem, 4vw, 2.5rem); font-weight: 600; }
     .overlay p  { font-size: clamp(0.95rem, 2vw, 1.2rem); color: #999; max-width: 42rem; line-height: 1.5; }
-    .overlay .operator-url { color: #666; font-size: 0.9rem; font-family: ui-monospace, monospace; }
 
     #disconnect-banner {
       position: fixed; top: 2rem; left: 50%;
@@ -52,37 +51,55 @@
     }
     #disconnect-banner.visible { display: block; }
 
-    #mode-badge {
-      position: fixed; bottom: 1.5rem; right: 1.5rem;
-      background: rgba(255, 255, 255, 0.08);
-      color: #666;
-      padding: 0.4rem 0.8rem;
-      border-radius: 0.4rem;
-      font-size: 0.85rem;
+    #cal-crosshair {
+      position: fixed; inset: 0;
+      display: none;
+      pointer-events: none;
+    }
+    #cal-crosshair.visible { display: block; }
+    #cal-crosshair::before, #cal-crosshair::after {
+      content: '';
+      position: absolute;
+      background: rgba(255, 255, 255, 0.35);
+    }
+    #cal-crosshair::before {
+      left: 50%; top: 0; bottom: 0;
+      width: 2px; transform: translateX(-50%);
+    }
+    #cal-crosshair::after {
+      top: 50%; left: 0; right: 0;
+      height: 2px; transform: translateY(-50%);
+    }
+    #cal-crosshair span {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, calc(-50% - 2.5rem));
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 1rem;
       letter-spacing: 0.05em;
       text-transform: uppercase;
-      display: none;
     }
-    #mode-badge.visible { display: block; }
   </style>
 </head>
 <body>
   <div id="setup-view" class="overlay visible">
     <img id="qr-img" alt="QR code to pair phone" />
-    <h1>Scan with iPhone to Pair</h1>
+    <h1>Scan with Phone to Pair</h1>
     <p id="mobile-url"></p>
-    <p class="operator-url">Operator calibrates at: <span id="operator-url"></span></p>
+    <p style="color:#666;font-size:0.9rem;">Point phone at screen center → Calibrate → aim like a laser.</p>
   </div>
 
-  <div id="pointer-cal-view" class="overlay">
-    <h1>Pointer Calibration</h1>
-    <p>On the phone: aim at screen center and tap &ldquo;Set Screen Center&rdquo;.</p>
+  <div id="cal-view" class="overlay">
+    <h1>Laser Pointer Calibration</h1>
+    <p>On the phone: point at the <strong style="color:#fff">center</strong> of this screen, then tap <strong style="color:#fff">Calibrate Center</strong>.</p>
   </div>
+
+  <div id="cal-crosshair"><span>Point here</span></div>
 
   <canvas id="spotlight-canvas"></canvas>
   <div id="disconnect-banner">Connection lost &mdash; waiting for phone&hellip;</div>
-  <div id="mode-badge"></div>
 
+  <script src="/orientation-map.js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script>
     'use strict';
@@ -91,40 +108,47 @@
     const isTestMode = new URLSearchParams(window.location.search).get('test') === '1';
 
     const setupView = document.getElementById('setup-view');
-    const pointerCalView = document.getElementById('pointer-cal-view');
+    const calView = document.getElementById('cal-view');
+    const calCrosshair = document.getElementById('cal-crosshair');
     const canvas = document.getElementById('spotlight-canvas');
     const disconnectBanner = document.getElementById('disconnect-banner');
-    const modeBadge = document.getElementById('mode-badge');
     const ctx = canvas.getContext('2d');
 
     const DISCONNECT_HOLD_MS = 5000;
     const FADE_DURATION_MS = 1000;
-    const MAX_ALPHA_JUMP_DEG = 20;
 
     let state = null;
-    let orientation = { alpha: 0, beta: 90, gamma: 0, rotationRate: null, t: null, still: false, omega: 0, v: 1 };
+    let orientation = { beta: 90, gamma: 0, alpha: 0, t: null };
+    let pointerX = 0.5;
+    let pointerY = 0.5;
     let currentX = null;
     let currentY = null;
-    let smoothingFactor = 0.1;
-    let gyroCorrectionGain = 0.03;
-    let sensX = 50;
-    let sensY = 40;
-    let fusionTauBase = 0.5;
-    let fusionTauStill = 0.15;
-    let fusionTauFast = 1.5;
-    let fastRotThresholdDps = 50;
+    let sensX = 58;
+    let sensY = 52;
+    let invertX = true;
+    let invertY = true;
+    let deadZoneX = 0;
+    let deadZoneY = 0;
+    let pointerFollowRate = 28;
     let useOneEuro = true;
-    let oneEuroMinCutoff = 0.6;
-    let oneEuroBeta = 1.2;
+    let oneEuroMinCutoffX = 3.5;
+    let oneEuroMinCutoffY = 3.5;
+    let oneEuroBeta = 2.5;
     let oneEuroDCutoff = 1.0;
     let disconnectedAt = null;
-    let filteredAlpha = null;
-    let fusedValue = null;
-    let lastPacketT = null;
-    let packetFusionActive = false;
-    let stillPct = null;
-    let lastRenderedPct = 0.5;
-    let lastFrameTime = null;
+    let lastDrawTime = performance.now();
+
+    const EXPAND_TARGET_SCALE = 2.5;
+    const EXPAND_SPRING_RATE = 12;
+    const BURST_DURATION_MS = 1200;
+    const BURST_PARTICLE_COUNT = 40;
+    const AURA_EMBER_COUNT = 20;
+
+    let expandActive = false;
+    let auraActive = false;
+    let radiusScale = 1;
+    let bursts = [];
+    let auraPhase = 0;
 
     class OneEuro {
       constructor({ minCutoff, beta, dCutoff }) {
@@ -136,8 +160,8 @@
         this.tPrev = null;
       }
 
-      reset() {
-        this.x = null;
+      reset(value) {
+        this.x = value ?? null;
         this.dx = 0;
         this.tPrev = null;
       }
@@ -165,27 +189,30 @@
       }
     }
 
-    const stageEuro = new OneEuro({ minCutoff: oneEuroMinCutoff, beta: oneEuroBeta, dCutoff: oneEuroDCutoff });
-
-    function angleDiff(a, b) {
-      return ((a - b + 540) % 360) - 180;
-    }
+    const euroX = new OneEuro({ minCutoff: oneEuroMinCutoffX, beta: oneEuroBeta, dCutoff: oneEuroDCutoff });
+    const euroY = new OneEuro({ minCutoff: oneEuroMinCutoffY, beta: oneEuroBeta, dCutoff: oneEuroDCutoff });
 
     function clamp(v, lo, hi) {
       return Math.min(hi, Math.max(lo, v));
     }
 
-    function axisDelta(axis, a, b) {
-      return axis === 'alpha' ? angleDiff(a, b) : a - b;
+    function applyMicroDeadZone(delta, zone) {
+      if (zone <= 0) return delta;
+      const abs = Math.abs(delta);
+      if (abs <= zone) return 0;
+      return Math.sign(delta) * (abs - zone);
     }
 
-    function resetTrackingState() {
-      filteredAlpha = null;
-      fusedValue = null;
-      lastPacketT = null;
-      packetFusionActive = false;
-      stillPct = null;
-      stageEuro.reset();
+    function smoothFollow(current, target, rate, dt) {
+      const alpha = 1 - Math.exp(-rate * dt);
+      return current + (target - current) * alpha;
+    }
+
+    function resetPointerToCenter() {
+      pointerX = 0.5;
+      pointerY = 0.5;
+      euroX.reset(0.5);
+      euroY.reset(0.5);
     }
 
     function resizeCanvas() {
@@ -199,173 +226,89 @@
 
     function applySettings(settings) {
       if (!settings) return;
-      const mode = state && state.trackingMode;
-      smoothingFactor = mode === 'pointer'
-        ? (settings.pointerSmoothingFactor ?? smoothingFactor)
-        : (settings.stageSmoothingFactor ?? smoothingFactor);
-      gyroCorrectionGain = settings.gyroCorrectionGain ?? gyroCorrectionGain;
       sensX = settings.pointerSensitivityX ?? sensX;
       sensY = settings.pointerSensitivityY ?? sensY;
-      fusionTauBase = settings.fusionTauBase ?? fusionTauBase;
-      fusionTauStill = settings.fusionTauStill ?? fusionTauStill;
-      fusionTauFast = settings.fusionTauFast ?? fusionTauFast;
-      fastRotThresholdDps = settings.fastRotThresholdDps ?? fastRotThresholdDps;
+      invertX = settings.invertX ?? invertX;
+      invertY = settings.invertY ?? invertY;
+      deadZoneX = settings.deadZoneX ?? deadZoneX;
+      deadZoneY = settings.deadZoneY ?? deadZoneY;
+      pointerFollowRate = settings.pointerFollowRate ?? pointerFollowRate;
       useOneEuro = settings.useOneEuro ?? useOneEuro;
-      oneEuroMinCutoff = settings.oneEuroMinCutoff ?? oneEuroMinCutoff;
+      oneEuroMinCutoffX = settings.oneEuroMinCutoffX ?? oneEuroMinCutoffX;
+      oneEuroMinCutoffY = settings.oneEuroMinCutoffY ?? oneEuroMinCutoffY;
       oneEuroBeta = settings.oneEuroBeta ?? oneEuroBeta;
       oneEuroDCutoff = settings.oneEuroDCutoff ?? oneEuroDCutoff;
-      stageEuro.minCutoff = oneEuroMinCutoff;
-      stageEuro.beta = oneEuroBeta;
-      stageEuro.dCutoff = oneEuroDCutoff;
+      euroX.minCutoff = oneEuroMinCutoffX;
+      euroX.beta = oneEuroBeta;
+      euroX.dCutoff = oneEuroDCutoff;
+      euroY.minCutoff = oneEuroMinCutoffY;
+      euroY.beta = oneEuroBeta;
+      euroY.dCutoff = oneEuroDCutoff;
     }
 
-    function currentFusionTau(still, omega) {
-      if (still) return fusionTauStill;
-      if (omega > fastRotThresholdDps) return fusionTauFast;
-      return fusionTauBase;
-    }
-
-    function filterStageAlpha(alpha) {
-      if (filteredAlpha === null) {
-        filteredAlpha = alpha;
-        return alpha;
+    function computePointerFromOrientation(w, h) {
+      if (!state || !state.isCalibrated || state.centerBeta == null) {
+        return { x: w / 2, y: h / 2, pctX: 0.5, pctY: 0.5 };
       }
-      if (Math.abs(angleDiff(alpha, filteredAlpha)) > MAX_ALPHA_JUMP_DEG) return filteredAlpha;
-      filteredAlpha = alpha;
-      return alpha;
-    }
 
-    function mapMultiPointToPct(value, points, axis) {
-      const pts = points.filter((p) => p.snapshot);
-      if (pts.length < 2) return 0.5;
-
-      function val(p) { return p.snapshot[axis]; }
-
-      for (let i = 0; i < pts.length - 1; i++) {
-        const v0 = val(pts[i]);
-        const v1 = val(pts[i + 1]);
-        const span = axisDelta(axis, v1, v0);
-        if (Math.abs(span) < 0.001) continue;
-        const t = axisDelta(axis, value, v0) / span;
-        if (t >= 0 && t <= 1) {
-          return pts[i].pct + t * (pts[i + 1].pct - pts[i].pct);
+      const { panDeg, tiltDeg } = OrientationMap.computeDecoupledAnglesDeg(
+        {
+          alpha: orientation.alpha ?? 0,
+          beta: orientation.beta,
+          gamma: orientation.gamma,
+        },
+        {
+          alpha: state.centerAlpha ?? 0,
+          beta: state.centerBeta,
+          gamma: state.centerGamma,
         }
-      }
+      );
 
-      const v0 = val(pts[0]);
-      const v1 = val(pts[1]);
-      const span0 = axisDelta(axis, v1, v0);
-      const pos0 = axisDelta(axis, value, v0);
-      if (Math.abs(span0) >= 0.001 && Math.sign(pos0) !== Math.sign(span0)) {
-        return clamp(pts[0].pct + (pos0 / span0) * (pts[1].pct - pts[0].pct), 0, 1);
-      }
+      const signX = invertX ? -1 : 1;
+      const signY = invertY ? -1 : 1;
+      const dx = applyMicroDeadZone(signX * panDeg, deadZoneX);
+      const dy = applyMicroDeadZone(signY * tiltDeg, deadZoneY);
 
-      const last = pts.length - 1;
-      const spanL = axisDelta(axis, val(pts[last]), val(pts[last - 1]));
-      const posL = axisDelta(axis, value, val(pts[last - 1]));
-      return clamp(pts[last - 1].pct + (posL / spanL) * (pts[last].pct - pts[last - 1].pct), 0, 1);
-    }
-
-    function applyStageOffset(pct) {
-      return clamp(pct + (state && state.stageOffsetPct ? state.stageOffsetPct : 0), 0, 1);
-    }
-
-    function fuseOnPacket(data) {
-      const cal = state && state.calibration;
-      if (!cal || state.trackingMode !== 'stage') return;
-
-      const axis = cal.mappingAxis || 'alpha';
-      const compass = data[axis];
-      const rate = data.rotationRate && data.rotationRate[axis];
-
-      if (typeof data.t !== 'number' || !Number.isFinite(data.t)) {
-        packetFusionActive = false;
-        return;
-      }
-
-      packetFusionActive = true;
-      const dtS = lastPacketT === null
-        ? 0
-        : clamp((data.t - lastPacketT) / 1000, 0, 0.1);
-      lastPacketT = data.t;
-
-      if (fusedValue === null) fusedValue = compass;
-
-      if (rate != null && dtS > 0) {
-        fusedValue += rate * dtS;
-      }
-
-      if (dtS > 0) {
-        const pull = 1 - Math.exp(-dtS / currentFusionTau(data.still, data.omega || 0));
-        if (axis === 'alpha') {
-          fusedValue = (fusedValue + angleDiff(compass, fusedValue) * pull + 360) % 360;
-        } else {
-          fusedValue += (compass - fusedValue) * pull;
-        }
-      } else if (fusedValue === null) {
-        fusedValue = compass;
-      }
-    }
-
-    function getStageTrackingValue(axis, dt) {
-      const compass = orientation[axis];
-      const rate = orientation.rotationRate && orientation.rotationRate[axis];
-
-      if (packetFusionActive && fusedValue !== null) {
-        return axis === 'alpha' ? filterStageAlpha(fusedValue) : fusedValue;
-      }
-
-      if (rate == null || dt == null || dt <= 0) {
-        fusedValue = compass;
-        return axis === 'alpha' ? filterStageAlpha(compass) : compass;
-      }
-
-      if (fusedValue === null) fusedValue = compass;
-      fusedValue += rate * dt;
-      if (axis === 'alpha') {
-        fusedValue = (fusedValue + angleDiff(compass, fusedValue) * gyroCorrectionGain + 360) % 360;
-        return filterStageAlpha(fusedValue);
-      }
-      fusedValue += (compass - fusedValue) * gyroCorrectionGain;
-      return fusedValue;
+      const pctX = clamp(0.5 + dx * (sensX / w), 0, 1);
+      const pctY = clamp(0.5 + dy * (sensY / h), 0, 1);
+      return { x: pctX * w, y: pctY * h, pctX, pctY };
     }
 
     function renderViews() {
       const phoneUp = state && state.isPhoneConnected;
-      const cal = state && state.calibration;
-      const phase = cal && cal.phase;
-      const mode = state && state.trackingMode;
-      const live = cal && cal.isCalibrated && (phoneUp || disconnectedAt !== null);
-      const showCanvas = phoneUp && (
-        (mode === 'stage' && (phase === 'marks' || phase === 'verify' || phase === 'live')) ||
-        (mode === 'pointer' && cal.isCalibrated) ||
-        live
-      );
+      const calibrated = state && state.isCalibrated;
+      const wasLive = disconnectedAt !== null && calibrated;
+      const showCanvas = phoneUp && calibrated;
+      const needsCal = phoneUp && !calibrated;
 
-      setupView.classList.toggle('visible', !phoneUp && !live);
-      pointerCalView.classList.toggle('visible', mode === 'pointer' && phoneUp && !cal.isCalibrated);
-      canvas.style.display = showCanvas ? 'block' : 'none';
+      setupView.classList.toggle('visible', !phoneUp && !wasLive);
+      calView.classList.toggle('visible', needsCal);
+      calCrosshair.classList.toggle('visible', needsCal);
+      canvas.style.display = showCanvas || wasLive ? 'block' : 'none';
 
       disconnectBanner.classList.toggle(
         'visible',
-        live && !phoneUp && disconnectedAt !== null &&
-          performance.now() - disconnectedAt > DISCONNECT_HOLD_MS
+        wasLive && !phoneUp && performance.now() - disconnectedAt > DISCONNECT_HOLD_MS
       );
-
-      const badgeLabels = { marks: 'Calibrating', verify: 'Verify', live: 'Stage Walk' };
-      modeBadge.textContent = mode === 'pointer' ? 'Pointer' : (badgeLabels[phase] || 'Stage Walk');
-      modeBadge.classList.toggle('visible', showCanvas && mode === 'stage');
     }
 
-    socket.on('init', ({ state: s, qrDataUrl, mobileUrl, operatorUrl }) => {
+    socket.on('init', ({ state: s, qrDataUrl, mobileUrl }) => {
       state = s;
-      orientation = s.currentOrientation || orientation;
       applySettings(s.settings);
+      auraActive = !!s.auraActive;
+      expandActive = !!s.expandActive;
       if (qrDataUrl) document.getElementById('qr-img').src = qrDataUrl;
       if (mobileUrl) document.getElementById('mobile-url').textContent = mobileUrl;
-      if (operatorUrl) document.getElementById('operator-url').textContent = operatorUrl;
       if (s.isPhoneConnected) disconnectedAt = null;
       renderViews();
+    });
+
+    socket.on('orientation_update', (data) => {
+      orientation = data;
+    });
+
+    socket.on('recenter', () => {
+      resetPointerToCenter();
     });
 
     socket.on('state_update', (s) => {
@@ -374,68 +317,158 @@
       applySettings(s.settings);
       if (s.isPhoneConnected) disconnectedAt = null;
       else if (wasConnected) disconnectedAt = performance.now();
-      if (!s.calibration.isCalibrated && s.calibration.phase === 'marks') {
-        resetTrackingState();
-      }
       renderViews();
     });
 
-    socket.on('orientation_update', (data) => {
-      fuseOnPacket(data);
-      orientation = data;
-      if (!orientation.still) stillPct = null;
+    socket.on('state_update', (s) => {
+      const wasConnected = state && state.isPhoneConnected;
+      state = s;
+      applySettings(s.settings);
+      auraActive = !!s.auraActive;
+      if (!s.isPhoneConnected) expandActive = false;
+      else expandActive = !!s.expandActive;
+      if (s.isPhoneConnected) disconnectedAt = null;
+      else if (wasConnected) disconnectedAt = performance.now();
+      renderViews();
     });
 
-    function computeTarget(w, h, dt) {
-      const cx = w / 2;
-      const cy = h / 2;
-      const cal = state && state.calibration;
-      if (!cal) return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none', targetPct: 0.5 };
+    socket.on('effect_burst', () => {
+      if (currentX === null || currentY === null) return;
+      spawnBurst(currentX, currentY, performance.now());
+    });
 
-      if (state.trackingMode === 'pointer') {
-        if (!cal.isCalibrated) return { x: cx, y: cy, mode: 'none', targetPct: 0.5 };
-        const { centerBeta, centerGamma } = cal;
-        const centerG = centerGamma ?? 0;
-        return {
-          x: clamp(cx + (orientation.gamma - centerG) * sensX, 0, w),
-          y: clamp(cy + (orientation.beta - centerBeta) * sensY, 0, h),
-          mode: 'live',
-          targetPct: 0.5,
-        };
+    socket.on('effect_expand', ({ active }) => {
+      expandActive = !!active;
+    });
+
+    socket.on('effect_aura', ({ active }) => {
+      auraActive = !!active;
+    });
+
+    function spawnBurst(x, y, now) {
+      const particles = [];
+      for (let i = 0; i < BURST_PARTICLE_COUNT; i++) {
+        const angle = (Math.PI * 2 * i) / BURST_PARTICLE_COUNT + (Math.random() - 0.5) * 0.4;
+        const speed = 180 + Math.random() * 320;
+        particles.push({
+          angle,
+          speed,
+          size: 2 + Math.random() * 4,
+          life: 0.6 + Math.random() * 0.4,
+        });
+      }
+      bursts.push({ x, y, startTime: now, particles });
+    }
+
+    function cullBursts(now) {
+      bursts = bursts.filter((b) => now - b.startTime < BURST_DURATION_MS);
+    }
+
+    function baseRadius(w, h) {
+      return Math.min(w, h) * 0.22;
+    }
+
+    function drawAura(x, y, w, h, now, intensity) {
+      auraPhase += 0.016;
+      const breath = 0.85 + Math.sin(auraPhase * 1.8) * 0.15;
+      const r = baseRadius(w, h) * radiusScale * (1.8 + breath * 0.5);
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+
+      const halo = ctx.createRadialGradient(x, y, r * 0.15, x, y, r);
+      halo.addColorStop(0, `rgba(255, 240, 210, ${0.12 * intensity})`);
+      halo.addColorStop(0.45, `rgba(255, 220, 180, ${0.08 * intensity})`);
+      halo.addColorStop(0.75, `rgba(200, 180, 255, ${0.04 * intensity})`);
+      halo.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      const ring = ctx.createRadialGradient(x, y, r * 0.72, x, y, r * 0.95);
+      ring.addColorStop(0, 'rgba(255, 255, 255, 0)');
+      ring.addColorStop(0.5, `rgba(255, 255, 255, ${0.18 * intensity * breath})`);
+      ring.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = ring;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      for (let i = 0; i < AURA_EMBER_COUNT; i++) {
+        const phase = auraPhase * (0.6 + (i % 5) * 0.08) + i * 1.37;
+        const orbit = r * (0.55 + (i % 7) * 0.06);
+        const ex = x + Math.cos(phase) * orbit;
+        const ey = y + Math.sin(phase * 1.13) * orbit * 0.85;
+        const emberAlpha = (0.25 + Math.sin(phase * 2.1) * 0.15) * intensity;
+        const emberR = 1.5 + (i % 3) * 0.8;
+        const ember = ctx.createRadialGradient(ex, ey, 0, ex, ey, emberR * 3);
+        ember.addColorStop(0, `rgba(255, 230, 200, ${emberAlpha})`);
+        ember.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.fillStyle = ember;
+        ctx.beginPath();
+        ctx.arc(ex, ey, emberR * 3, 0, Math.PI * 2);
+        ctx.fill();
       }
 
-      const phase = cal.phase;
-      if (phase === 'marks') {
-        const axis = cal.mappingAxis || 'alpha';
-        const captured = cal.points.filter((p) => p.snapshot).length;
-        if (captured === 0) {
-          return { x: cx, y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5 };
+      ctx.restore();
+    }
+
+    function drawBursts(w, h, now, intensity) {
+      if (!bursts.length) return;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+
+      for (const burst of bursts) {
+        const elapsed = now - burst.startTime;
+        const t = elapsed / BURST_DURATION_MS;
+        if (t >= 1) continue;
+
+        const flash = Math.max(0, 1 - elapsed / 180);
+        if (flash > 0) {
+          ctx.fillStyle = `rgba(255, 255, 255, ${flash * 0.35 * intensity})`;
+          ctx.fillRect(0, 0, w, h);
         }
-        const value = getStageTrackingValue(axis, dt);
-        let pct = applyStageOffset(mapMultiPointToPct(value, cal.points, axis));
-        return { x: clamp(pct * w, 0, w), y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5, rawPct: pct };
-      }
 
-      if (phase === 'verify' || phase === 'live') {
-        const axis = cal.mappingAxis || 'alpha';
-        const value = getStageTrackingValue(axis, dt);
-        let pct = applyStageOffset(mapMultiPointToPct(value, cal.points, axis));
+        const ringR = 40 + elapsed * 0.55;
+        const ringAlpha = Math.max(0, (1 - t * 1.1) * 0.85 * intensity);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${ringAlpha})`;
+        ctx.lineWidth = 3 + (1 - t) * 8;
+        ctx.beginPath();
+        ctx.arc(burst.x, burst.y, ringR, 0, Math.PI * 2);
+        ctx.stroke();
 
-        if (orientation.still) {
-          if (stillPct === null) stillPct = lastRenderedPct;
-          pct = stillPct;
+        const ring2Alpha = Math.max(0, (1 - t * 1.3) * 0.5 * intensity);
+        ctx.strokeStyle = `rgba(255, 220, 180, ${ring2Alpha})`;
+        ctx.lineWidth = 1 + (1 - t) * 4;
+        ctx.beginPath();
+        ctx.arc(burst.x, burst.y, ringR * 0.65, 0, Math.PI * 2);
+        ctx.stroke();
+
+        for (const p of burst.particles) {
+          const lifeT = elapsed / (BURST_DURATION_MS * p.life);
+          if (lifeT >= 1) continue;
+          const dist = p.speed * (elapsed / 1000);
+          const px = burst.x + Math.cos(p.angle) * dist;
+          const py = burst.y + Math.sin(p.angle) * dist;
+          const pAlpha = Math.max(0, (1 - lifeT) * intensity);
+          const spark = ctx.createRadialGradient(px, py, 0, px, py, p.size * 2);
+          spark.addColorStop(0, `rgba(255, 255, 255, ${pAlpha})`);
+          spark.addColorStop(0.4, `rgba(255, 230, 200, ${pAlpha * 0.6})`);
+          spark.addColorStop(1, 'rgba(255, 255, 255, 0)');
+          ctx.fillStyle = spark;
+          ctx.beginPath();
+          ctx.arc(px, py, p.size * 2, 0, Math.PI * 2);
+          ctx.fill();
         }
-
-        lastRenderedPct = pct;
-        const targetX = clamp(pct * w, 0, w);
-        return { x: targetX, y: cy, mode: phase === 'verify' ? 'verify' : 'live', rawPct: pct, targetPct: pct };
       }
 
-      return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none', targetPct: 0.5 };
+      ctx.restore();
     }
 
     function drawSpot(x, y, w, h, intensity, scale) {
-      const radius = Math.min(w, h) * 0.22 * scale;
+      const radius = baseRadius(w, h) * scale;
       const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
       g.addColorStop(0.0, `rgba(255, 255, 255, ${intensity})`);
       g.addColorStop(0.5, `rgba(255, 255, 255, ${0.85 * intensity})`);
@@ -447,66 +480,58 @@
       ctx.fill();
     }
 
-    function drawTargetLine(w, h, pct) {
-      const x = pct * w;
-      ctx.setLineDash([8, 12]);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-
     function draw(now) {
       requestAnimationFrame(draw);
+
+      const dt = Math.min(Math.max((now - lastDrawTime) / 1000, 1 / 240), 0.05);
+      lastDrawTime = now;
+
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const aimed = computePointerFromOrientation(w, h);
+      let targetPctX = aimed.pctX;
+      let targetPctY = aimed.pctY;
+
+      if (useOneEuro) {
+        targetPctX = clamp(euroX.filter(targetPctX, now), 0, 1);
+        targetPctY = clamp(euroY.filter(targetPctY, now), 0, 1);
+      }
+
+      pointerX = targetPctX;
+      pointerY = targetPctY;
 
       if (isTestMode) {
         window.__spotlightTestHook = {
           currentX,
           currentY,
-          lastRenderedPct,
-          fusedValue,
-          packetFusionActive,
-          stillPct,
-          orientation: { ...orientation },
-          stageOffsetPct: state && state.stageOffsetPct,
+          pointerX,
+          pointerY,
           canvasVisible: canvas.style.display !== 'none',
+          isCalibrated: state && state.isCalibrated,
         };
       }
 
       if (canvas.style.display === 'none') return;
 
-      const dt = lastFrameTime === null ? 0 : Math.min((now - lastFrameTime) / 1000, 0.05);
-      lastFrameTime = now;
+      let targetX = pointerX * w;
+      let targetY = pointerY * h;
 
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      let target = computeTarget(w, h, dt);
-
-      if (disconnectedAt !== null && state.calibration.isCalibrated) {
-        target = { x: currentX ?? w / 2, y: currentY ?? h / 2, mode: 'live', targetPct: lastRenderedPct };
+      if (disconnectedAt !== null) {
+        targetX = currentX ?? w / 2;
+        targetY = currentY ?? h / 2;
         renderViews();
       }
 
-      const isPreview = target.mode === 'marks';
-      const isLive = target.mode === 'live' || target.mode === 'verify';
+      if (currentX === null) currentX = targetX;
+      if (currentY === null) currentY = targetY;
 
-      if (isLive || isPreview) {
-        if (currentX === null) currentX = target.x;
-        if (currentY === null) currentY = target.y;
+      currentX = clamp(smoothFollow(currentX, targetX, pointerFollowRate, dt), 0, w);
+      currentY = clamp(smoothFollow(currentY, targetY, pointerFollowRate, dt), 0, h);
 
-        if (isLive && useOneEuro && target.targetPct != null) {
-          const filteredPct = stageEuro.filter(target.targetPct, now);
-          currentX = clamp(filteredPct * w, 0, w);
-          currentY = target.y;
-        } else {
-          const smooth = isPreview ? smoothingFactor * 0.5 : smoothingFactor;
-          currentX += (target.x - currentX) * smooth;
-          currentY += (target.y - currentY) * smooth;
-        }
-      }
+      const expandTarget = expandActive ? EXPAND_TARGET_SCALE : 1;
+      radiusScale = smoothFollow(radiusScale, expandTarget, EXPAND_SPRING_RATE, dt);
+
+      cullBursts(now);
 
       let intensity = 1;
       if (disconnectedAt !== null) {
@@ -519,24 +544,24 @@
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, w, h);
 
-      if (isPreview) {
-        drawTargetLine(w, h, target.targetPct ?? 0.5);
-        drawSpot(currentX, currentY, w, h, 0.4, 0.65);
-      } else if (isLive && intensity > 0) {
-        drawSpot(currentX, currentY, w, h, intensity, 1);
+      if (intensity > 0) {
+        drawBursts(w, h, now, intensity);
+        if (auraActive) drawAura(currentX, currentY, w, h, now, intensity);
+        drawSpot(currentX, currentY, w, h, intensity, radiusScale);
       }
 
       if (isTestMode) {
         window.__spotlightTestHook = {
           currentX,
           currentY,
-          lastRenderedPct,
-          fusedValue,
-          packetFusionActive,
-          stillPct,
-          orientation: { ...orientation },
-          stageOffsetPct: state && state.stageOffsetPct,
+          pointerX,
+          pointerY,
           canvasVisible: canvas.style.display !== 'none',
+          isCalibrated: state && state.isCalibrated,
+          radiusScale,
+          activeBurstCount: bursts.length,
+          auraActive,
+          expandActive,
         };
       }
     }
