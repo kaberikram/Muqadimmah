@@ -1,10 +1,9 @@
 # Gyro Spotlight Tracker
 
-A lightweight, pure-web projection-mapping system: a performer carries an iPhone
-in their pocket, and a desktop browser (driving a projector) renders a canvas
-spotlight that follows their left/right position across the stage. Orientation
-data streams from the phone's compass over Socket.IO on the local Wi-Fi —
-no internet required at show time.
+A lightweight, pure-web projection-mapping system: a performer walks left and right
+across a ~3.5 m stage while a canvas spotlight on the projected screen tracks their
+position. The phone stays **in a pocket**; orientation streams over Socket.IO on
+local Wi-Fi — no internet required at show time.
 
 ## Stack
 
@@ -14,6 +13,40 @@ no internet required at show time.
   `public/vendor/tailwind.js`, so everything works offline)
 - **Pairing**: QR code generated at boot from the machine's LAN IP
 
+## Two-screen setup
+
+```
+Projector / TV  →  https://<lan-ip>:3000/        (QR, preview, spotlight)
+Laptop operator →  https://<lan-ip>:3000/operator  (calibration wizard)
+iPhone          →  https://<lan-ip>:3000/mobile    (sensors only, then pocket)
+```
+
+The **projector** never shows calibration buttons — only the QR code, a dim
+preview dot during calibration, and the live spotlight.
+
+The **laptop** runs the operator page: confirm positions, verification walk, Start Show.
+
+## Standard projector layout
+
+```
+        [ Screen — UPSTAGE / back wall ]
+              ↑ projected image
+              
+   L -------- C -------- R   ← performer walks this line (downstage)
+              
+        [ Audience — DOWNSTAGE ]
+              
+   [ Projector + laptop — at back ]
+```
+
+## How pocket tracking works
+
+The phone reads orientation (compass + tilt). That only changes with position if
+your **body faces the audience center** — the normal performance stance.
+
+The app samples **alpha, beta, and gamma** in the pocket at **four stage marks**,
+auto-picks the best axis, and uses **gyro assist** during the show to smooth pocket jitter.
+
 ## Quick start
 
 ```bash
@@ -21,50 +54,89 @@ npm install
 npm start
 ```
 
-The console prints two URLs:
+Console output:
 
 ```
 Desktop (projector): https://192.168.x.x:3000/
+Operator (laptop):   https://192.168.x.x:3000/operator
 Mobile  (performer): https://192.168.x.x:3000/mobile
 ```
 
-1. Open the **desktop** URL in the browser connected to the projector and make
-   it full screen. Accept the self-signed certificate warning.
-2. On the iPhone, **scan the QR code** shown on the desktop screen (or type the
-   mobile URL). Accept the certificate warning there too.
-3. Tap **Activate Motion Sensors** and grant the motion permission. The screen
-   stays awake automatically (Wake Lock).
-4. Calibrate: stand at the **left** edge of the stage facing the screen, tap
-   **Set Left Boundary**; walk to the **right** edge, tap **Set Right
-   Boundary**. The desktop switches to the live spotlight immediately.
+### 1. Phone (once)
 
-### Why HTTPS with a self-signed certificate?
+- Scan QR on projector → **Activate Motion Sensors** → pocket the phone.
+- Artist does not touch the phone again.
 
-iOS Safari only exposes `DeviceOrientationEvent.requestPermission()` and the
-Wake Lock API in a **secure context**. Over plain `http://` on a LAN IP the
-motion-permission prompt never appears, so the server generates a self-signed
-certificate at boot and serves everything over HTTPS. It's a one-time "trust
-this website" tap on each device, and the whole loop still runs fully offline.
+### 2. Laptop — operator page (`/operator`)
 
-## Behavior details
+Four-step calibration with **averaged pocket samples** on each Confirm:
 
-- **Angle wraparound** — mapping uses signed shortest-arc math, so a stage that
-  straddles the 359° → 0° compass seam works fine.
-- **Inverse boundaries** — if the right boundary is a "smaller" angle than the
-  left, the scale flips automatically; walking left always maps to x = 0.
-- **Degenerate calibration** — boundaries closer than 5° apart are rejected
-  with a message on the phone.
-- **Disconnect handling** — if the phone drops mid-show, the spotlight holds
-  its last position for 5 seconds, then fades out and shows a reconnect banner.
-  Calibration survives the reconnect; the performer doesn't have to redo it.
-- **Smoothing** — the desktop applies `currentX += (targetX - currentX) * 0.1`
-  each animation frame to filter out pocket bounce.
+| Step | Artist stands at | Operator action |
+| --- | --- | --- |
+| 1 | Left edge | Confirm (or Space) |
+| 2 | Left of center | Confirm |
+| 3 | Right of center | Confirm |
+| 4 | Right edge | Confirm |
+
+At each mark: face audience center, hold still ~1 s while the server averages readings.
+
+**Verification walk:** artist slowly walks left → right. Operator watches the
+**projector** spotlight, then clicks **Start Show**.
+
+### 3. Show
+
+Walk the stage — spotlight follows. Same pocket, face audience center.
+
+## Projector during calibration
+
+While the operator calibrates on the laptop, the projector shows:
+
+- **Dashed target line** at the current mark (where the artist should stand)
+- **Dim preview dot** at the mapped position from confirmed marks so far
+
+During verification and live show, the full spotlight appears.
+
+## Maximizing pocket accuracy
+
+| Do | Why |
+| --- | --- |
+| **Same pocket every time** | Consistent orientation signature |
+| **Face audience center** at each mark | Creates heading spread across stage width |
+| **Hold still before Confirm** | Server averages ~0.8 s of pocket readings |
+| **Verification walk** before Start Show | Catch bad calibration before the audience |
+| **Operator on `/operator`, not projector** | Artist never sees calibration UI |
+
+| Avoid | Why |
+| --- | --- |
+| Facing only upstage (screen) | Heading stays constant — tracking fails |
+| Switching pockets mid-show | Breaks mapping |
+| Confirming before artist is still | Noisy averaged snapshot |
+
+## Tracking modes
+
+### Stage Walk (primary)
+
+Pocket-based horizontal tracking with 4-point laptop calibration, verification
+step, multi-axis mapping, and gyro+compass fusion.
+
+### Pointer (experimental)
+
+Hand-held laser-pointer aim. Calibrated on the phone.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PORT` | `3000` | HTTPS port for both pages and the socket |
+| `PORT` | `3000` | HTTPS port |
 
-The smoothing factor (`0.1`) lives in the server's shared state
-(`settings.smoothingFactor` in `server.js`).
+Settings in `server.js` → `state.settings`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `stageSmoothingFactor` | `0.1` | Lerp per frame for stage walk |
+| `gyroCorrectionGain` | `0.03` | Compass pull on gyro fusion (lower = smoother, more lag) |
+
+### Why HTTPS?
+
+iOS requires a secure context for motion sensors and Wake Lock. Self-signed cert at
+boot; one-time trust on each device. Fully offline at show time.

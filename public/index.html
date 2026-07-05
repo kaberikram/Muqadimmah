@@ -7,7 +7,6 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: #000; overflow: hidden; cursor: none; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 
     #spotlight-canvas {
       position: fixed; inset: 0;
@@ -21,10 +20,11 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 2rem;
+      gap: 1.5rem;
       background: #000;
       color: #fff;
       text-align: center;
+      padding: 2rem;
       cursor: default;
     }
     .overlay.visible { display: flex; }
@@ -35,13 +35,10 @@
       background: #fff;
       padding: 1.5rem;
       border-radius: 1rem;
-      image-rendering: pixelated;
     }
-    .overlay h1 { font-size: clamp(1.5rem, 4vw, 3rem); font-weight: 600; letter-spacing: 0.02em; }
-    .overlay p  { font-size: clamp(1rem, 2vw, 1.4rem); color: #999; }
-
-    .pulse { animation: pulse 2s ease-in-out infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .overlay h1 { font-size: clamp(1.5rem, 4vw, 2.5rem); font-weight: 600; }
+    .overlay p  { font-size: clamp(0.95rem, 2vw, 1.2rem); color: #999; max-width: 42rem; line-height: 1.5; }
+    .overlay .operator-url { color: #666; font-size: 0.9rem; font-family: ui-monospace, monospace; }
 
     #disconnect-banner {
       position: fixed; top: 2rem; left: 50%;
@@ -54,25 +51,37 @@
       display: none;
     }
     #disconnect-banner.visible { display: block; }
+
+    #mode-badge {
+      position: fixed; bottom: 1.5rem; right: 1.5rem;
+      background: rgba(255, 255, 255, 0.08);
+      color: #666;
+      padding: 0.4rem 0.8rem;
+      border-radius: 0.4rem;
+      font-size: 0.85rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      display: none;
+    }
+    #mode-badge.visible { display: block; }
   </style>
 </head>
 <body>
-  <!-- State 1: pairing -->
   <div id="setup-view" class="overlay visible">
     <img id="qr-img" alt="QR code to pair phone" />
-    <h1>Scan with iPhone to Pair.</h1>
+    <h1>Scan with iPhone to Pair</h1>
     <p id="mobile-url"></p>
+    <p class="operator-url">Operator calibrates at: <span id="operator-url"></span></p>
   </div>
 
-  <!-- State 2: waiting for calibration -->
-  <div id="calibration-view" class="overlay">
-    <h1 class="pulse">Waiting for Artist Calibration&hellip;</h1>
-    <p>On the phone: face stage-left, tap &ldquo;Set Left Boundary&rdquo;, then face stage-right and tap &ldquo;Set Right Boundary&rdquo;.</p>
+  <div id="pointer-cal-view" class="overlay">
+    <h1>Pointer Calibration</h1>
+    <p>On the phone: aim at screen center and tap &ldquo;Set Screen Center&rdquo;.</p>
   </div>
 
-  <!-- State 3: live performance -->
   <canvas id="spotlight-canvas"></canvas>
   <div id="disconnect-banner">Connection lost &mdash; waiting for phone&hellip;</div>
+  <div id="mode-badge"></div>
 
   <script src="/socket.io/socket.io.js"></script>
   <script>
@@ -81,23 +90,29 @@
     const socket = io();
 
     const setupView = document.getElementById('setup-view');
-    const calibrationView = document.getElementById('calibration-view');
+    const pointerCalView = document.getElementById('pointer-cal-view');
     const canvas = document.getElementById('spotlight-canvas');
     const disconnectBanner = document.getElementById('disconnect-banner');
+    const modeBadge = document.getElementById('mode-badge');
     const ctx = canvas.getContext('2d');
 
-    // Hold the spotlight at its last position this long after the phone
-    // drops before fading out — a mid-show blip shouldn't kill the light.
     const DISCONNECT_HOLD_MS = 5000;
     const FADE_DURATION_MS = 1000;
+    const MAX_ALPHA_JUMP_DEG = 20;
 
-    let state = null;             // latest server state snapshot
-    let currentAngle = 0;         // latest raw angle from the phone
-    let currentX = null;          // smoothed spotlight position (null = uninitialized)
+    let state = null;
+    let orientation = { alpha: 0, beta: 90, gamma: 0, rotationRate: null };
+    let currentX = null;
+    let currentY = null;
     let smoothingFactor = 0.1;
-    let disconnectedAt = null;    // timestamp of phone disconnect, null while connected
+    let gyroCorrectionGain = 0.03;
+    let sensX = 50;
+    let sensY = 40;
+    let disconnectedAt = null;
+    let filteredAlpha = null;
+    let fusedValue = null;
+    let lastFrameTime = null;
 
-    /** Signed shortest-arc difference a - b, normalized to [-180, 180). */
     function angleDiff(a, b) {
       return ((a - b + 540) % 360) - 180;
     }
@@ -106,9 +121,10 @@
       return Math.min(hi, Math.max(lo, v));
     }
 
-    // ------------------------------------------------------------------
-    // Canvas sizing (devicePixelRatio-aware so the gradient stays crisp)
-    // ------------------------------------------------------------------
+    function axisDelta(axis, a, b) {
+      return axis === 'alpha' ? angleDiff(a, b) : a - b;
+    }
+
     function resizeCanvas() {
       const dpr = window.devicePixelRatio || 1;
       canvas.width = Math.round(window.innerWidth * dpr);
@@ -118,36 +134,111 @@
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
-    // ------------------------------------------------------------------
-    // UI state machine
-    // ------------------------------------------------------------------
+    function applySettings(settings) {
+      if (!settings) return;
+      const mode = state && state.trackingMode;
+      smoothingFactor = mode === 'pointer'
+        ? (settings.pointerSmoothingFactor ?? smoothingFactor)
+        : (settings.stageSmoothingFactor ?? smoothingFactor);
+      gyroCorrectionGain = settings.gyroCorrectionGain ?? gyroCorrectionGain;
+      sensX = settings.pointerSensitivityX ?? sensX;
+      sensY = settings.pointerSensitivityY ?? sensY;
+    }
+
+    function filterStageAlpha(alpha) {
+      if (filteredAlpha === null) {
+        filteredAlpha = alpha;
+        return alpha;
+      }
+      if (Math.abs(angleDiff(alpha, filteredAlpha)) > MAX_ALPHA_JUMP_DEG) return filteredAlpha;
+      filteredAlpha = alpha;
+      return alpha;
+    }
+
+    function mapMultiPointToPct(value, points, axis) {
+      const pts = points.filter((p) => p.snapshot);
+      if (pts.length < 2) return 0.5;
+
+      function val(p) { return p.snapshot[axis]; }
+
+      for (let i = 0; i < pts.length - 1; i++) {
+        const v0 = val(pts[i]);
+        const v1 = val(pts[i + 1]);
+        const span = axisDelta(axis, v1, v0);
+        if (Math.abs(span) < 0.001) continue;
+        const t = axisDelta(axis, value, v0) / span;
+        if (t >= 0 && t <= 1) {
+          return pts[i].pct + t * (pts[i + 1].pct - pts[i].pct);
+        }
+      }
+
+      const v0 = val(pts[0]);
+      const v1 = val(pts[1]);
+      const span0 = axisDelta(axis, v1, v0);
+      const pos0 = axisDelta(axis, value, v0);
+      if (Math.abs(span0) >= 0.001 && Math.sign(pos0) !== Math.sign(span0)) {
+        return clamp(pts[0].pct + (pos0 / span0) * (pts[1].pct - pts[0].pct), 0, 1);
+      }
+
+      const last = pts.length - 1;
+      const spanL = axisDelta(axis, val(pts[last]), val(pts[last - 1]));
+      const posL = axisDelta(axis, value, val(pts[last - 1]));
+      return clamp(pts[last - 1].pct + (posL / spanL) * (pts[last].pct - pts[last - 1].pct), 0, 1);
+    }
+
+    function getStageTrackingValue(axis, dt) {
+      const compass = orientation[axis];
+      const rate = orientation.rotationRate && orientation.rotationRate[axis];
+
+      if (rate == null || dt == null || dt <= 0) {
+        fusedValue = compass;
+        return axis === 'alpha' ? filterStageAlpha(compass) : compass;
+      }
+
+      if (fusedValue === null) fusedValue = compass;
+      fusedValue += rate * dt;
+      if (axis === 'alpha') {
+        fusedValue = (fusedValue + angleDiff(compass, fusedValue) * gyroCorrectionGain + 360) % 360;
+        return filterStageAlpha(fusedValue);
+      }
+      fusedValue += (compass - fusedValue) * gyroCorrectionGain;
+      return fusedValue;
+    }
+
     function renderViews() {
       const phoneUp = state && state.isPhoneConnected;
-      const calibrated = state && state.calibration.isCalibrated;
-
-      // Live mode persists through a disconnect (the hold-and-fade path);
-      // only fall back to the QR screen if we were never calibrated.
-      const live = calibrated && (phoneUp || disconnectedAt !== null);
+      const cal = state && state.calibration;
+      const phase = cal && cal.phase;
+      const mode = state && state.trackingMode;
+      const live = cal && cal.isCalibrated && (phoneUp || disconnectedAt !== null);
+      const showCanvas = phoneUp && (
+        (mode === 'stage' && (phase === 'marks' || phase === 'verify' || phase === 'live')) ||
+        (mode === 'pointer' && cal.isCalibrated) ||
+        live
+      );
 
       setupView.classList.toggle('visible', !phoneUp && !live);
-      calibrationView.classList.toggle('visible', phoneUp && !calibrated);
-      canvas.style.display = live ? 'block' : 'none';
+      pointerCalView.classList.toggle('visible', mode === 'pointer' && phoneUp && !cal.isCalibrated);
+      canvas.style.display = showCanvas ? 'block' : 'none';
+
       disconnectBanner.classList.toggle(
         'visible',
         live && !phoneUp && disconnectedAt !== null &&
           performance.now() - disconnectedAt > DISCONNECT_HOLD_MS
       );
+
+      const badgeLabels = { marks: 'Calibrating', verify: 'Verify', live: 'Stage Walk' };
+      modeBadge.textContent = mode === 'pointer' ? 'Pointer' : (badgeLabels[phase] || 'Stage Walk');
+      modeBadge.classList.toggle('visible', showCanvas && mode === 'stage');
     }
 
-    // ------------------------------------------------------------------
-    // Socket wiring
-    // ------------------------------------------------------------------
-    socket.on('init', ({ state: s, qrDataUrl, mobileUrl }) => {
+    socket.on('init', ({ state: s, qrDataUrl, mobileUrl, operatorUrl }) => {
       state = s;
-      currentAngle = s.currentAngle;
-      smoothingFactor = s.settings.smoothingFactor;
+      orientation = s.currentOrientation || orientation;
+      applySettings(s.settings);
       if (qrDataUrl) document.getElementById('qr-img').src = qrDataUrl;
       if (mobileUrl) document.getElementById('mobile-url').textContent = mobileUrl;
+      if (operatorUrl) document.getElementById('operator-url').textContent = operatorUrl;
       if (s.isPhoneConnected) disconnectedAt = null;
       renderViews();
     });
@@ -155,51 +246,108 @@
     socket.on('state_update', (s) => {
       const wasConnected = state && state.isPhoneConnected;
       state = s;
-      smoothingFactor = s.settings.smoothingFactor;
-
-      if (s.isPhoneConnected) {
-        disconnectedAt = null;
-      } else if (wasConnected) {
-        disconnectedAt = performance.now();
+      applySettings(s.settings);
+      if (s.isPhoneConnected) disconnectedAt = null;
+      else if (wasConnected) disconnectedAt = performance.now();
+      if (!s.calibration.isCalibrated && s.calibration.phase === 'marks') {
+        filteredAlpha = null;
+        fusedValue = null;
       }
       renderViews();
     });
 
-    socket.on('gyro_update', (angle) => {
-      currentAngle = angle;
+    socket.on('orientation_update', (data) => {
+      orientation = data;
     });
 
-    // ------------------------------------------------------------------
-    // Render loop: lerp mapping + exponential smoothing + spotlight draw
-    // ------------------------------------------------------------------
+    function computeTarget(w, h, dt) {
+      const cx = w / 2;
+      const cy = h / 2;
+      const cal = state && state.calibration;
+      if (!cal) return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none' };
+
+      if (state.trackingMode === 'pointer') {
+        if (!cal.isCalibrated) return { x: cx, y: cy, mode: 'none' };
+        const { centerAlpha, centerBeta } = cal;
+        return {
+          x: clamp(cx + angleDiff(orientation.alpha, centerAlpha) * sensX, 0, w),
+          y: clamp(cy + (orientation.beta - centerBeta) * sensY, 0, h),
+          mode: 'live',
+        };
+      }
+
+      const phase = cal.phase;
+      if (phase === 'marks') {
+        const axis = cal.mappingAxis || 'alpha';
+        const captured = cal.points.filter((p) => p.snapshot).length;
+        if (captured === 0) return { x: cx, y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5 };
+        const value = getStageTrackingValue(axis, dt);
+        const pct = mapMultiPointToPct(value, cal.points, axis);
+        return { x: clamp(pct * w, 0, w), y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5 };
+      }
+
+      if (phase === 'verify' || phase === 'live') {
+        const axis = cal.mappingAxis || 'alpha';
+        const value = getStageTrackingValue(axis, dt);
+        const pct = mapMultiPointToPct(value, cal.points, axis);
+        return { x: clamp(pct * w, 0, w), y: cy, mode: phase === 'verify' ? 'verify' : 'live' };
+      }
+
+      return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none' };
+    }
+
+    function drawSpot(x, y, w, h, intensity, scale) {
+      const radius = Math.min(w, h) * 0.22 * scale;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
+      g.addColorStop(0.0, `rgba(255, 255, 255, ${intensity})`);
+      g.addColorStop(0.5, `rgba(255, 255, 255, ${0.85 * intensity})`);
+      g.addColorStop(0.8, `rgba(255, 255, 255, ${0.25 * intensity})`);
+      g.addColorStop(1.0, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawTargetLine(w, h, pct) {
+      const x = pct * w;
+      ctx.setLineDash([8, 12]);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     function draw(now) {
       requestAnimationFrame(draw);
       if (canvas.style.display === 'none') return;
 
+      const dt = lastFrameTime === null ? 0 : Math.min((now - lastFrameTime) / 1000, 0.05);
+      lastFrameTime = now;
+
       const w = window.innerWidth;
       const h = window.innerHeight;
+      let target = computeTarget(w, h, dt);
 
-      let targetX = currentX === null ? w / 2 : currentX;
-      if (state && state.calibration.isCalibrated) {
-        const { leftAngle, rightAngle } = state.calibration;
-        // Shortest-arc ratio: continuous across the 0°/360° seam, and if the
-        // right boundary sits "below" the left one both diffs flip sign, so
-        // stage-left always lands at x=0 without a special case.
-        const span = angleDiff(rightAngle, leftAngle);
-        const pct = clamp(angleDiff(currentAngle, leftAngle) / span, 0, 1);
-        targetX = clamp(pct * w, 0, w);
+      if (disconnectedAt !== null && state.calibration.isCalibrated) {
+        target = { x: currentX ?? w / 2, y: currentY ?? h / 2, mode: 'live' };
+        renderViews();
       }
 
-      // While disconnected, freeze on the last known position.
-      if (disconnectedAt !== null) {
-        targetX = currentX === null ? w / 2 : currentX;
-        renderViews(); // keeps the banner timer honest without a setTimeout
+      const isPreview = target.mode === 'marks';
+      const isLive = target.mode === 'live' || target.mode === 'verify';
+
+      if (isLive || isPreview) {
+        if (currentX === null) currentX = target.x;
+        if (currentY === null) currentY = target.y;
+        const smooth = isPreview ? smoothingFactor * 0.5 : smoothingFactor;
+        currentX += (target.x - currentX) * smooth;
+        currentY += (target.y - currentY) * smooth;
       }
 
-      if (currentX === null) currentX = targetX;
-      currentX += (targetX - currentX) * smoothingFactor;
-
-      // After the hold window, fade the spotlight out over FADE_DURATION_MS.
       let intensity = 1;
       if (disconnectedAt !== null) {
         const sinceDrop = now - disconnectedAt;
@@ -211,18 +359,11 @@
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, w, h);
 
-      if (intensity > 0) {
-        const cy = h / 2;
-        const radius = h * 0.3;
-        const g = ctx.createRadialGradient(currentX, cy, 0, currentX, cy, radius);
-        g.addColorStop(0.0, `rgba(255, 255, 255, ${intensity})`);
-        g.addColorStop(0.5, `rgba(255, 255, 255, ${0.85 * intensity})`);
-        g.addColorStop(0.8, `rgba(255, 255, 255, ${0.25 * intensity})`);
-        g.addColorStop(1.0, 'rgba(255, 255, 255, 0)');
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(currentX, cy, radius, 0, Math.PI * 2);
-        ctx.fill();
+      if (isPreview) {
+        drawTargetLine(w, h, target.targetPct ?? 0.5);
+        drawSpot(currentX, currentY, w, h, 0.4, 0.65);
+      } else if (isLive && intensity > 0) {
+        drawSpot(currentX, currentY, w, h, intensity, 1);
       }
     }
     requestAnimationFrame(draw);

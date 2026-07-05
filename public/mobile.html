@@ -19,11 +19,32 @@
       </div>
     </header>
 
-    <!-- Live angle readout -->
+    <!-- Mode switch -->
+    <div class="grid grid-cols-2 gap-2 p-1 bg-neutral-900 rounded-xl">
+      <button id="mode-pointer"
+        class="py-3 rounded-lg text-sm font-bold bg-neutral-800 text-neutral-400 transition-colors">
+        Pointer
+      </button>
+      <button id="mode-stage"
+        class="py-3 rounded-lg text-sm font-bold bg-blue-600 transition-colors">
+        Stage Walk
+      </button>
+    </div>
+
+    <!-- Live orientation readout -->
     <div class="bg-neutral-900 rounded-2xl p-5 text-center">
-      <p class="text-neutral-400 text-sm uppercase tracking-widest mb-1">Compass Heading</p>
-      <p id="angle-readout" class="text-6xl font-mono font-bold tabular-nums">&mdash;</p>
-      <p id="sensor-status" class="text-neutral-500 text-sm mt-2">Sensors inactive</p>
+      <p class="text-neutral-400 text-sm uppercase tracking-widest mb-1">Orientation</p>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <p class="text-neutral-500 text-xs uppercase">Yaw</p>
+          <p id="alpha-readout" class="text-4xl font-mono font-bold tabular-nums">&mdash;</p>
+        </div>
+        <div>
+          <p class="text-neutral-500 text-xs uppercase">Pitch</p>
+          <p id="beta-readout" class="text-4xl font-mono font-bold tabular-nums">&mdash;</p>
+        </div>
+      </div>
+      <p id="sensor-status" class="text-neutral-500 text-sm mt-3">Sensors inactive</p>
     </div>
 
     <!-- Step 1: permissions -->
@@ -32,27 +53,36 @@
       Activate Motion Sensors
     </button>
 
-    <!-- Step 2: calibration -->
-    <div id="calibration-panel" class="flex flex-col gap-3 opacity-40 pointer-events-none transition-opacity">
+    <!-- Step 2: pointer calibration -->
+    <div id="pointer-panel" class="hidden flex-col gap-3 opacity-40 pointer-events-none transition-opacity">
       <p class="text-neutral-400 text-sm text-center">
-        Stand at each edge of the stage, face the projection screen, and tap:
+        Hold the phone like a laser pointer. Aim at the <strong class="text-white">center</strong> of the screen, then tap:
       </p>
-      <div class="grid grid-cols-2 gap-3">
-        <button id="left-btn"
-          class="py-8 rounded-2xl bg-neutral-800 active:bg-neutral-700 text-xl font-bold transition-colors">
-          Set Left<br />Boundary
-        </button>
-        <button id="right-btn"
-          class="py-8 rounded-2xl bg-neutral-800 active:bg-neutral-700 text-xl font-bold transition-colors">
-          Set Right<br />Boundary
-        </button>
-      </div>
-      <button id="recalibrate-btn"
-        class="w-full py-3 rounded-xl bg-neutral-900 text-neutral-400 text-sm font-semibold hidden">
-        Recalibrate
+      <button id="center-btn"
+        class="py-8 rounded-2xl bg-neutral-800 active:bg-neutral-700 text-xl font-bold transition-colors">
+        Set Screen Center
       </button>
-      <p id="calibration-status" class="text-center text-sm text-neutral-500">Awaiting calibration</p>
+      <p id="pointer-status" class="text-center text-sm text-neutral-500">Point at center to calibrate</p>
     </div>
+
+    <!-- Stage: pocket mode — calibration happens on the laptop -->
+    <div id="stage-panel" class="flex flex-col gap-3 opacity-40 pointer-events-none transition-opacity">
+      <div class="bg-neutral-900 rounded-xl p-4 text-sm text-neutral-400 leading-relaxed">
+        <p class="text-neutral-300 font-semibold mb-2">Pocket mode</p>
+        <ol class="list-decimal pl-5 space-y-2">
+          <li>Tap <strong class="text-white">Activate Motion Sensors</strong> below</li>
+          <li>Put phone in your pocket — <strong class="text-white">same pocket</strong> for the whole show</li>
+          <li>Follow position instructions on the <strong class="text-white">operator laptop</strong> (<code class="text-neutral-300">/operator</code>)</li>
+          <li>Operator confirms each position from the laptop — you don&rsquo;t touch the phone again</li>
+        </ol>
+      </div>
+      <p id="stage-status" class="text-center text-sm text-neutral-500">Activate sensors, then pocket the phone</p>
+    </div>
+
+    <button id="recalibrate-btn"
+      class="w-full py-3 rounded-xl bg-neutral-900 text-neutral-400 text-sm font-semibold hidden">
+      Recalibrate
+    </button>
 
     <!-- Error / event log -->
     <details class="mt-auto">
@@ -69,24 +99,36 @@
 
     const connDot = document.getElementById('conn-dot');
     const connLabel = document.getElementById('conn-label');
-    const angleReadout = document.getElementById('angle-readout');
+    const alphaReadout = document.getElementById('alpha-readout');
+    const betaReadout = document.getElementById('beta-readout');
     const sensorStatus = document.getElementById('sensor-status');
     const activateBtn = document.getElementById('activate-btn');
-    const calibrationPanel = document.getElementById('calibration-panel');
-    const leftBtn = document.getElementById('left-btn');
-    const rightBtn = document.getElementById('right-btn');
+    const modePointerBtn = document.getElementById('mode-pointer');
+    const modeStageBtn = document.getElementById('mode-stage');
+    const pointerPanel = document.getElementById('pointer-panel');
+    const stagePanel = document.getElementById('stage-panel');
+    const centerBtn = document.getElementById('center-btn');
     const recalibrateBtn = document.getElementById('recalibrate-btn');
-    const calibrationStatus = document.getElementById('calibration-status');
+    const pointerStatus = document.getElementById('pointer-status');
+    const stageStatus = document.getElementById('stage-status');
     const logEl = document.getElementById('log');
 
     let sensorsActive = false;
-    let currentAngle = null;   // latest heading, rounded to 0.1°
-    let lastSentAngle = null;  // last value emitted (dedupe / rate limit)
+    let trackingMode = 'stage';
+    let currentOrientation = null;
     let wakeLock = null;
+    let smoothedAlpha = null;
+    let latestRotationRate = null;
+    const ALPHA_EMA = 0.2;
 
-    // ------------------------------------------------------------------
-    // On-page logging — devtools aren't available on stage
-    // ------------------------------------------------------------------
+    function angleDiff(a, b) {
+      return ((a - b + 540) % 360) - 180;
+    }
+
+    function emaAngle(prev, next, factor) {
+      return (prev + angleDiff(next, prev) * factor + 360) % 360;
+    }
+
     function log(msg) {
       const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
       logEl.textContent = line + logEl.textContent.slice(0, 4000);
@@ -94,14 +136,33 @@
     window.addEventListener('error', (e) => log(`ERROR: ${e.message}`));
     window.addEventListener('unhandledrejection', (e) => log(`REJECTION: ${e.reason}`));
 
-    // ------------------------------------------------------------------
-    // Socket status
-    // ------------------------------------------------------------------
+    function round1(v) {
+      return Math.round(v * 10) / 10;
+    }
+
+    function renderModeButtons() {
+      const isPointer = trackingMode === 'pointer';
+      modePointerBtn.className = isPointer
+        ? 'py-3 rounded-lg text-sm font-bold bg-blue-600 transition-colors'
+        : 'py-3 rounded-lg text-sm font-bold bg-neutral-800 text-neutral-400 transition-colors';
+      modeStageBtn.className = isPointer
+        ? 'py-3 rounded-lg text-sm font-bold bg-neutral-800 text-neutral-400 transition-colors'
+        : 'py-3 rounded-lg text-sm font-bold bg-blue-600 transition-colors';
+      pointerPanel.classList.toggle('hidden', !isPointer);
+      pointerPanel.classList.toggle('flex', isPointer);
+      stagePanel.classList.toggle('hidden', isPointer);
+      stagePanel.classList.toggle('flex', !isPointer);
+    }
+
+    function enableCalibrationPanel() {
+      pointerPanel.classList.remove('opacity-40', 'pointer-events-none');
+      stagePanel.classList.remove('opacity-40', 'pointer-events-none');
+    }
+
     socket.on('connect', () => {
       connDot.className = 'w-3 h-3 rounded-full bg-green-500';
       connLabel.textContent = 'Connected';
       log('Socket connected');
-      // Re-announce after any reconnect so the desktop leaves the QR screen.
       if (sensorsActive) socket.emit('phone_connected');
     });
     socket.on('disconnect', (reason) => {
@@ -111,61 +172,112 @@
     });
     socket.on('connect_error', (err) => log(`Socket error: ${err.message}`));
 
-    socket.on('state_update', (state) => renderCalibration(state.calibration));
-    socket.on('init', ({ state }) => renderCalibration(state.calibration));
+    socket.on('state_update', (state) => {
+      trackingMode = state.trackingMode || 'stage';
+      renderModeButtons();
+      renderCalibration(state);
+    });
+    socket.on('init', ({ state }) => {
+      trackingMode = state.trackingMode || 'stage';
+      renderModeButtons();
+      renderCalibration(state);
+    });
 
-    function renderCalibration(cal) {
-      setBoundaryButton(leftBtn, 'Set Left<br />Boundary', cal.leftAngle);
-      setBoundaryButton(rightBtn, 'Set Right<br />Boundary', cal.rightAngle);
-      recalibrateBtn.classList.toggle('hidden', cal.leftAngle === null && cal.rightAngle === null);
-      if (cal.isCalibrated) {
-        calibrationStatus.textContent = 'Calibrated — spotlight is live!';
-        calibrationStatus.className = 'text-center text-sm text-green-400 font-semibold';
-      } else if (cal.leftAngle !== null && cal.rightAngle !== null) {
-        // Both set but not calibrated = server rejected them as too close.
-        calibrationStatus.textContent = 'Boundaries under 5° apart — recalibrate further apart';
-        calibrationStatus.className = 'text-center text-sm text-yellow-400';
+    function renderCalibration(state) {
+      const cal = state.calibration;
+      const isPointer = state.trackingMode === 'pointer';
+
+      recalibrateBtn.classList.toggle('hidden', !isPointer || !cal.isCalibrated);
+
+      if (isPointer) {
+        if (cal.isCalibrated && cal.centerAlpha !== null) {
+          centerBtn.innerHTML =
+            `&#10003; Center Set<br /><span class="text-sm font-normal">α ${cal.centerAlpha.toFixed(1)}° β ${cal.centerBeta.toFixed(1)}°</span>`;
+          centerBtn.className = 'py-8 rounded-2xl bg-green-600 text-xl font-bold transition-colors';
+          centerBtn.disabled = true;
+          pointerStatus.textContent = 'Calibrated — aim to move the spotlight';
+          pointerStatus.className = 'text-center text-sm text-green-400 font-semibold';
+        } else {
+          centerBtn.textContent = 'Set Screen Center';
+          centerBtn.className = 'py-8 rounded-2xl bg-neutral-800 active:bg-neutral-700 text-xl font-bold transition-colors';
+          centerBtn.disabled = false;
+          pointerStatus.textContent = 'Point at center to calibrate';
+          pointerStatus.className = 'text-center text-sm text-neutral-500';
+        }
+        return;
+      }
+
+      const phase = cal.phase;
+      const points = cal.points || [];
+      const total = points.length || 4;
+      const current = cal.currentStep ?? 0;
+
+      if (phase === 'live' || cal.isCalibrated) {
+        stageStatus.textContent =
+          `Live — ${cal.mappingAxis} (${cal.qualitySpan.toFixed(1)}° range). Keep facing audience center.`;
+        stageStatus.className = 'text-center text-sm text-green-400 font-semibold';
+      } else if (phase === 'verify') {
+        stageStatus.textContent = 'Verification walk — slowly cross the stage, watch the projector';
+        stageStatus.className = 'text-center text-sm text-blue-400 font-semibold';
+      } else if (cal.error) {
+        stageStatus.textContent = cal.error;
+        stageStatus.className = 'text-center text-sm text-yellow-400';
+      } else if (sensorsActive && phase === 'marks' && current < total) {
+        const label = points[current]?.label || 'next mark';
+        stageStatus.textContent = `Stand at: ${label} — operator confirms on laptop (${current + 1}/${total})`;
+        stageStatus.className = 'text-center text-sm text-blue-400 font-semibold';
+      } else if (sensorsActive) {
+        stageStatus.textContent = 'Phone in pocket — follow the laptop screen';
+        stageStatus.className = 'text-center text-sm text-neutral-400';
       } else {
-        calibrationStatus.textContent = 'Awaiting calibration';
-        calibrationStatus.className = 'text-center text-sm text-neutral-500';
+        stageStatus.textContent = 'Activate sensors, then pocket the phone';
+        stageStatus.className = 'text-center text-sm text-neutral-500';
       }
     }
 
-    function setBoundaryButton(btn, defaultHtml, angle) {
-      if (angle !== null) {
-        btn.innerHTML = `&#10003; Set<br /><span class="text-sm font-normal">${angle.toFixed(1)}&deg;</span>`;
-        btn.className = 'py-8 rounded-2xl bg-green-600 text-xl font-bold transition-colors';
-        btn.disabled = true;
-      } else {
-        btn.innerHTML = defaultHtml;
-        btn.className = 'py-8 rounded-2xl bg-neutral-800 active:bg-neutral-700 text-xl font-bold transition-colors';
-        btn.disabled = false;
-      }
+    function emitOrientation() {
+      if (!currentOrientation || !socket.connected) return;
+      socket.volatile.emit('orientation_update', {
+        alpha: currentOrientation.alpha,
+        beta: currentOrientation.beta,
+        gamma: currentOrientation.gamma,
+        rotationRate: latestRotationRate,
+      });
     }
 
-    // ------------------------------------------------------------------
-    // Sensor permission + streaming
-    // ------------------------------------------------------------------
+    function handleMotion(event) {
+      const rr = event.rotationRate;
+      if (!rr) return;
+      latestRotationRate = {
+        alpha: round1(rr.alpha),
+        beta: round1(rr.beta),
+        gamma: round1(rr.gamma),
+      };
+      if (currentOrientation) emitOrientation();
+    }
+
     function handleOrientation(event) {
-      // iOS: webkitCompassHeading is the absolute compass bearing (clockwise
-      // from north) and doesn't drift; alpha alone is relative on Safari.
-      let heading = null;
+      let alpha = null;
       if (typeof event.webkitCompassHeading === 'number' && !Number.isNaN(event.webkitCompassHeading)) {
-        heading = event.webkitCompassHeading;
+        alpha = event.webkitCompassHeading;
       } else if (typeof event.alpha === 'number' && event.alpha !== null) {
-        heading = event.alpha;
+        alpha = event.alpha;
       }
-      if (heading === null) return;
+      if (alpha === null || typeof event.beta !== 'number' || event.beta === null) return;
+      if (typeof event.gamma !== 'number' || event.gamma === null) return;
 
-      currentAngle = Math.round(((heading % 360) + 360) % 360 * 10) / 10;
-      angleReadout.textContent = currentAngle.toFixed(1) + '°';
+      const rawAlpha = round1(((alpha % 360) + 360) % 360);
+      const rawBeta = round1(event.beta);
+      const rawGamma = round1(event.gamma);
+      smoothedAlpha = smoothedAlpha === null
+        ? rawAlpha
+        : round1(emaAngle(smoothedAlpha, rawAlpha, ALPHA_EMA));
 
-      // Only emit when the rounded value actually changed — dedupes the
-      // ~60 Hz sensor stream down to meaningful updates.
-      if (currentAngle !== lastSentAngle && socket.connected) {
-        lastSentAngle = currentAngle;
-        socket.volatile.emit('gyro_update', currentAngle);
-      }
+      currentOrientation = { alpha: smoothedAlpha, beta: rawBeta, gamma: rawGamma };
+      alphaReadout.textContent = smoothedAlpha.toFixed(1) + '°';
+      betaReadout.textContent = rawBeta.toFixed(1) + '°';
+
+      emitOrientation();
     }
 
     async function acquireWakeLock() {
@@ -181,26 +293,33 @@
         log(`Wake lock failed: ${err.message}`);
       }
     }
-    // Wake locks are auto-released when the tab is hidden; re-grab on return.
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && sensorsActive) acquireWakeLock();
     });
 
     activateBtn.addEventListener('click', async () => {
       try {
-        // iOS 13+ requires an explicit permission grant from a user gesture.
         if (typeof DeviceOrientationEvent !== 'undefined' &&
             typeof DeviceOrientationEvent.requestPermission === 'function') {
           const result = await DeviceOrientationEvent.requestPermission();
           if (result !== 'granted') {
             log(`Motion permission ${result}`);
             sensorStatus.textContent = 'Permission denied — check Safari settings';
-            sensorStatus.className = 'text-red-400 text-sm mt-2';
+            sensorStatus.className = 'text-red-400 text-sm mt-3';
             return;
           }
         }
 
+        if (typeof DeviceMotionEvent !== 'undefined' &&
+            typeof DeviceMotionEvent.requestPermission === 'function') {
+          const motionResult = await DeviceMotionEvent.requestPermission();
+          if (motionResult !== 'granted') {
+            log(`Device motion permission ${motionResult} — gyro assist disabled`);
+          }
+        }
+
         window.addEventListener('deviceorientation', handleOrientation);
+        window.addEventListener('devicemotion', handleMotion);
         sensorsActive = true;
         socket.emit('phone_connected');
         await acquireWakeLock();
@@ -209,42 +328,51 @@
         activateBtn.className = 'w-full py-6 rounded-2xl bg-green-600 text-2xl font-bold shadow-lg';
         activateBtn.disabled = true;
         sensorStatus.textContent = 'Streaming orientation…';
-        sensorStatus.className = 'text-green-400 text-sm mt-2';
-        calibrationPanel.classList.remove('opacity-40', 'pointer-events-none');
-        log('Sensors activated');
+        sensorStatus.className = 'text-green-400 text-sm mt-3';
+        enableCalibrationPanel();
+        if (trackingMode === 'stage') {
+          stageStatus.textContent = 'Put phone in pocket — follow laptop screen';
+          stageStatus.className = 'text-center text-sm text-blue-400 font-semibold';
+        }
+        log('Sensors activated — pocket the phone for stage mode');
       } catch (err) {
         log(`Activation failed: ${err.message}`);
         sensorStatus.textContent = 'Activation failed — see event log';
-        sensorStatus.className = 'text-red-400 text-sm mt-2';
+        sensorStatus.className = 'text-red-400 text-sm mt-3';
       }
     });
 
-    // ------------------------------------------------------------------
-    // Calibration buttons
-    // ------------------------------------------------------------------
-    function sendCalibration(eventName, btn) {
-      if (currentAngle === null) {
-        log('No sensor reading yet — walk around a little and retry');
-        calibrationStatus.textContent = 'No heading yet — sensors warming up';
-        calibrationStatus.className = 'text-center text-sm text-yellow-400';
-        return;
-      }
-      const angle = currentAngle;
-      btn.disabled = true;
-      socket.emit(eventName, angle, (res) => {
-        if (res && res.ok === false && res.error) {
-          log(`Calibration rejected: ${res.error}`);
-          calibrationStatus.textContent = res.error;
-          calibrationStatus.className = 'text-center text-sm text-yellow-400';
-          btn.disabled = false;
-        } else {
-          log(`${eventName} = ${angle.toFixed(1)}°`);
-        }
-      });
+    function switchMode(mode) {
+      if (mode === trackingMode) return;
+      trackingMode = mode;
+      socket.emit('set_tracking_mode', mode);
+      renderModeButtons();
+      log(`Mode → ${mode}`);
     }
 
-    leftBtn.addEventListener('click', () => sendCalibration('calibrate_left', leftBtn));
-    rightBtn.addEventListener('click', () => sendCalibration('calibrate_right', rightBtn));
+    modePointerBtn.addEventListener('click', () => switchMode('pointer'));
+    modeStageBtn.addEventListener('click', () => switchMode('stage'));
+
+    centerBtn.addEventListener('click', () => {
+      if (!currentOrientation) {
+        log('No sensor reading yet — move the phone a little and retry');
+        pointerStatus.textContent = 'No reading yet — sensors warming up';
+        pointerStatus.className = 'text-center text-sm text-yellow-400';
+        return;
+      }
+      centerBtn.disabled = true;
+      socket.emit('calibrate_center', currentOrientation, (res) => {
+        if (res && res.ok === false && res.error) {
+          log(`Calibration rejected: ${res.error}`);
+          pointerStatus.textContent = res.error;
+          pointerStatus.className = 'text-center text-sm text-yellow-400';
+          centerBtn.disabled = false;
+        } else {
+          log(`Center = α ${currentOrientation.alpha.toFixed(1)}° β ${currentOrientation.beta.toFixed(1)}°`);
+        }
+      });
+    });
+
     recalibrateBtn.addEventListener('click', () => {
       socket.emit('reset_calibration');
       log('Calibration reset');
