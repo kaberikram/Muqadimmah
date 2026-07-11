@@ -1,89 +1,52 @@
-# Gyro Spotlight Tracker
+# Gamepad Spotlight
 
-A lightweight, pure-web projection spotlight controlled like a **laser pointer** — point the phone at the screen and the spotlight follows.
+A fully static projection spotlight driven by a **gamepad** — one HTML file, no server, no pairing, no calibration. Plug in a controller and go.
 
 ## Stack
 
-- **Server**: Node.js + Express + Socket.IO (relay + shared state)
-- **Projector**: vanilla JS + HTML5 2D Canvas, full screen
-- **Phone**: vanilla JS + Tailwind CSS (laser pointer controller)
-- **Pairing**: QR code generated at boot from the machine's LAN IP
-
-## Setup
-
-```
-Projector + laptop  →  https://<lan-ip>:3000/
-Phone remote        →  https://<lan-ip>:3000/mobile
-```
-
-## How it works
-
-- Hold phone like a **laser pointer** (top edge toward screen)
-- **Pan left/right** and **tilt up/down** use decoupled 3D aim (beta/gamma no longer mapped independently)
-- **Calibrate Center**: point at screen center, tap once — that aim becomes center
-- **Re-calibrate Center**: point at center again if drift appears
-- **Snappy follow** — frame-rate-independent smoothing bridges sensor packets without lag
-- One Euro filter removes hand tremor when holding still; eases off during fast sweeps
+- **Projector**: a single self-contained page (`public/index.html`) — vanilla JS + HTML5 2D Canvas
+- **Input**: browser [Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), polled every animation frame
 
 ## Quick start
 
+Open `public/index.html` directly in Chrome (double-click / `file://` works), or serve it:
+
 ```bash
-npm install
-npm start
+npm start   # npx serve public
 ```
 
-### 1. Projector
+Connect a controller and **press any button** — browsers only expose a gamepad after the first input.
 
-Open `https://<lan-ip>:3000/` — QR code until phone pairs.
+## Controls (Xbox layout, standard mapping)
 
-### 2. Phone
-
-1. Scan QR → **Activate Motion Sensors**
-2. Point at **screen center** → **Calibrate Center**
-3. Aim to move the spotlight
-4. Adjust horizontal/vertical **reach** sliders if needed (higher = faster sweep)
-
-### 3. Effects (after calibration)
-
-| Button | Action | Effect |
+| Control | Action | Effect |
 | --- | --- | --- |
-| **Burst** | Tap | Explosive shockwave + sparks at aim point |
-| **Expand** | Hold | Spotlight grows ~2.5× while held, springs back on release |
-| **Aura** | Toggle | Breathing magical halo + orbiting embers around the spot |
+| **Left stick** | Deflect | Moves the spotlight (velocity — it holds position when released) |
+| **A** | Tap | Burst — shockwave + sparks at the spotlight |
+| **X** | Hold | Expand — spotlight grows ~2.5×, springs back on release |
+| **B** | Tap | Aura — toggle breathing halo + orbiting embers |
+| **Y** | Tap | Recenter — snap spotlight back to screen center |
 
-Point at your target, then trigger — effects render wherever the spotlight is aimed.
+## Feel & tuning
 
-## Tips
+Movement is a **velocity model**: stick deflection sets speed and direction, so you can park the spot on a performer and let go. A radial dead zone rejects stick drift, and an expo curve gives fine control near center with fast sweeps at full deflection.
 
-| Do | Why |
-| --- | --- |
-| Calibrate while pointing at center | Establishes zero reference |
-| Hold phone portrait, top toward screen | Matches gamma/beta → x/y mapping |
-| Re-calibrate if spot drifts | Fixes grip shift without restarting |
+Tunables at the top of the script in `public/index.html`:
 
-| Avoid | Why |
-| --- | --- |
-| Holding phone flat like a table | Axes won't match screen aim |
-| Skipping calibration | Spotlight won't know where "center" is |
-
-## Configuration
-
-Settings in `server.js` → `state.settings` (also adjustable from phone sliders):
-
-| Key | Default | Meaning |
+| Constant | Default | Meaning |
 | --- | --- | --- |
-| `pointerSensitivityX` | `58` | Pixels per degree of pan (gamma) — reach |
-| `pointerSensitivityY` | `52` | Pixels per degree of tilt (beta) — reach |
-| `invertX` / `invertY` | `true` | Flip axis direction |
-| `pointerFollowRate` | `28` | Display follow speed (higher = snappier) |
-| `useOneEuro` | `true` | Adaptive jitter filter when holding still |
+| `MOVE_SPEED` | `1.1` | Full-deflection travel, in screen-widths per second |
+| `STICK_DEADZONE` | `0.12` | Radial dead zone (raise if the spot drifts on its own) |
+| `STICK_EXPO` | `1.6` | Response curve; >1 = finer control near center |
+| `INVERT_Y` | `false` | Flip if up/down feels backwards on your controller |
+| `FOLLOW_RATE` | `28` | Spotlight easing (higher = snappier) |
+| `BTN_*` | `0/1/2/3` | Button indices — remap effects here |
 
 ## Tests
 
 ```bash
+npm install
 npm test
 ```
 
-## Why HTTPS?
-
-iOS requires a secure context for motion sensors. Self-signed cert at boot; one-time trust on each device.
+Playwright loads the page over `file://` with a mock gamepad injected, then drives the stick and buttons to verify movement, hold, dead zone, clamping, and every effect.

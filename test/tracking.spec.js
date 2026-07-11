@@ -1,204 +1,153 @@
 const { test, expect } = require('@playwright/test');
 const {
-  startTestServer,
-  stopTestServer,
-  resetServerState,
-  connectPhone,
-  connectSocket,
-  calibrateCenter,
-  emitOrientation,
-  emitEffectBurst,
-  emitEffectExpand,
-  emitEffectAura,
+  BUTTONS,
+  openProjector,
+  setAxes,
+  setButton,
+  tapButton,
+  getHook,
   waitForTestHook,
   sampleCurrentX,
   peakToPeak,
   sleep,
-  getBaseUrl,
-  getState,
-  SETTINGS_DEFAULTS,
 } = require('./helpers');
 
-test.beforeAll(async () => {
-  await startTestServer();
-});
-
-test.afterAll(async () => {
-  await stopTestServer();
-});
-
-test.beforeEach(() => {
-  resetServerState();
-});
-
-test('absolute aim moves spotlight when gamma changes after calibration', async ({ page }) => {
-  const phone = await connectPhone();
-  await calibrateCenter(phone, { beta: 90, gamma: 0 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
+test.beforeEach(async ({ page }) => {
+  await openProjector(page);
   await waitForTestHook(page);
-
-  await emitOrientation(phone, { beta: 90, gamma: 8, count: 30 });
-  await sleep(200);
-
-  const hook = await page.evaluate(() => window.__spotlightTestHook);
-  const expectedOffset = 8 * SETTINGS_DEFAULTS.pointerSensitivityX;
-  expect(hook.currentX).toBeLessThan(640 - expectedOffset * 0.7);
-
-  phone.disconnect();
 });
 
-test('calibrate center snaps spotlight to screen center', async ({ page }) => {
-  const phone = await connectPhone();
-  await emitOrientation(phone, { beta: 90, gamma: 10, count: 20 });
-  await calibrateCenter(phone, { beta: 90, gamma: 10 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-  await emitOrientation(phone, { beta: 90, gamma: 10, count: 30 });
-  await sleep(200);
-
-  const hook = await page.evaluate(() => window.__spotlightTestHook);
+test('starts centered with canvas visible', async ({ page }) => {
+  const hook = await getHook(page);
+  expect(hook.canvasVisible).toBe(true);
+  expect(hook.gamepadConnected).toBe(true);
   expect(hook.pointerX).toBeCloseTo(0.5, 1);
-  expect(hook.currentX).toBeGreaterThan(600);
-  expect(hook.currentX).toBeLessThan(680);
-
-  phone.disconnect();
+  expect(hook.pointerY).toBeCloseTo(0.5, 1);
 });
 
-test('steady aim keeps spotlight stable', async ({ page }) => {
-  const phone = await connectPhone();
-  await calibrateCenter(phone, { beta: 90, gamma: 0 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-
-  await emitOrientation(phone, { beta: 90, gamma: 0, count: 120 });
-  await sleep(200);
-
-  const xs = await sampleCurrentX(page, 1500);
-  expect(peakToPeak(xs)).toBeLessThan(5);
-
-  phone.disconnect();
-});
-
-test('higher horizontal sensitivity increases movement', async ({ page }) => {
-  const phone = await connectPhone();
-  const client = await connectSocket('client');
-
-  await new Promise((resolve) => {
-    client.emit('update_settings', { key: 'pointerSensitivityX', value: 100 }, resolve);
-  });
-  await calibrateCenter(phone, { beta: 90, gamma: 0 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-
-  await emitOrientation(phone, { beta: 90, gamma: 5, count: 30 });
-  await sleep(200);
-
-  const hook = await page.evaluate(() => window.__spotlightTestHook);
-  const defaultOffset = 5 * SETTINGS_DEFAULTS.pointerSensitivityX;
-  const highOffset = 5 * 100;
-  expect(640 - hook.currentX).toBeGreaterThan(defaultOffset * 1.5);
-  expect(640 - hook.currentX).toBeGreaterThan(highOffset * 0.7);
-
-  phone.disconnect();
-  client.disconnect();
-});
-
-test('vertical tilt moves spotlight vertically', async ({ page }) => {
-  const phone = await connectPhone();
-  await calibrateCenter(phone, { beta: 90, gamma: 0 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-
-  await emitOrientation(phone, { beta: 95, gamma: 0, count: 30 });
-  await sleep(200);
-
-  const hook = await page.evaluate(() => window.__spotlightTestHook);
-  expect(hook.currentY).toBeLessThan(360 - 5 * SETTINGS_DEFAULTS.pointerSensitivityY * 0.5);
-
-  phone.disconnect();
-});
-
-test('vertical pitch does not drift horizontally when euler axes couple', async ({ page }) => {
-  const phone = await connectPhone();
-  await calibrateCenter(phone, { beta: 75, gamma: 2, alpha: 30 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-
-  // Pure pitch up (+5°): beta rises, gamma barely changes — old code treated gamma drift as pan
-  await emitOrientation(phone, { beta: 80, gamma: 0.5, alpha: 32, count: 40 });
+test('pushing stick right moves spotlight right', async ({ page }) => {
+  await setAxes(page, 1, 0);
   await sleep(400);
+  await setAxes(page, 0, 0);
 
-  const hook = await page.evaluate(() => window.__spotlightTestHook);
-  expect(hook.currentY).toBeLessThan(360 - 20);
-  expect(hook.currentX).toBeGreaterThan(600);
-  expect(hook.currentX).toBeLessThan(680);
-
-  phone.disconnect();
+  const hook = await getHook(page);
+  expect(hook.pointerX).toBeGreaterThan(0.6);
+  expect(hook.currentX).toBeGreaterThan(640 + 50);
+  expect(hook.pointerY).toBeCloseTo(0.5, 1);
 });
 
-test('burst spawns and expires on projector', async ({ page }) => {
-  const phone = await connectPhone();
-  await calibrateCenter(phone, { beta: 90, gamma: 0 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-  await emitOrientation(phone, { beta: 90, gamma: 0, count: 10 });
+test('pushing stick down moves spotlight down', async ({ page }) => {
+  await setAxes(page, 0, 1);
+  await sleep(400);
+  await setAxes(page, 0, 0);
 
-  await emitEffectBurst(phone);
-  await sleep(100);
+  const hook = await getHook(page);
+  expect(hook.pointerY).toBeGreaterThan(0.6);
+  expect(hook.currentY).toBeGreaterThan(360 + 30);
+});
 
-  let hook = await page.evaluate(() => window.__spotlightTestHook);
+test('spotlight holds position when stick is released', async ({ page }) => {
+  await setAxes(page, 1, 0);
+  await sleep(400);
+  await setAxes(page, 0, 0);
+  await sleep(300);
+
+  const before = await getHook(page);
+  const xs = await sampleCurrentX(page, 1000);
+  expect(peakToPeak(xs)).toBeLessThan(3);
+
+  const after = await getHook(page);
+  expect(after.pointerX).toBeCloseTo(before.pointerX, 3);
+});
+
+test('deflection inside the dead zone causes no movement', async ({ page }) => {
+  await setAxes(page, 0.05, 0.05);
+  await sleep(600);
+
+  const hook = await getHook(page);
+  expect(hook.pointerX).toBeCloseTo(0.5, 2);
+  expect(hook.pointerY).toBeCloseTo(0.5, 2);
+});
+
+test('pointer clamps at screen edge', async ({ page }) => {
+  await setAxes(page, -1, 0);
+  await sleep(1500);
+  await setAxes(page, 0, 0);
+
+  const hook = await getHook(page);
+  expect(hook.pointerX).toBe(0);
+  expect(hook.currentX).toBeLessThan(20);
+});
+
+test('A button spawns a burst that expires', async ({ page }) => {
+  await tapButton(page, BUTTONS.BURST);
+
+  let hook = await getHook(page);
   expect(hook.activeBurstCount).toBeGreaterThan(0);
 
   await sleep(1300);
-  hook = await page.evaluate(() => window.__spotlightTestHook);
+  hook = await getHook(page);
   expect(hook.activeBurstCount).toBe(0);
-
-  phone.disconnect();
 });
 
-test('expand hold increases radius scale then releases', async ({ page }) => {
-  const phone = await connectPhone();
-  await calibrateCenter(phone, { beta: 90, gamma: 0 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-  await emitOrientation(phone, { beta: 90, gamma: 0, count: 10 });
+test('holding A does not retrigger burst until released', async ({ page }) => {
+  await setButton(page, BUTTONS.BURST, true);
+  await sleep(300);
 
-  await emitEffectExpand(phone, true);
+  let hook = await getHook(page);
+  expect(hook.activeBurstCount).toBe(1);
+
+  await setButton(page, BUTTONS.BURST, false);
+  await sleep(80);
+  await setButton(page, BUTTONS.BURST, true);
+  await sleep(100);
+
+  hook = await getHook(page);
+  expect(hook.activeBurstCount).toBe(2);
+
+  await setButton(page, BUTTONS.BURST, false);
+});
+
+test('holding X expands spotlight, springs back on release', async ({ page }) => {
+  await setButton(page, BUTTONS.EXPAND, true);
   await sleep(350);
 
-  let hook = await page.evaluate(() => window.__spotlightTestHook);
-  expect(hook.radiusScale).toBeGreaterThan(1.5);
+  let hook = await getHook(page);
   expect(hook.expandActive).toBe(true);
+  expect(hook.radiusScale).toBeGreaterThan(1.5);
 
-  await emitEffectExpand(phone, false);
+  await setButton(page, BUTTONS.EXPAND, false);
   await sleep(500);
 
-  hook = await page.evaluate(() => window.__spotlightTestHook);
-  expect(hook.radiusScale).toBeLessThan(1.4);
+  hook = await getHook(page);
   expect(hook.expandActive).toBe(false);
-
-  phone.disconnect();
+  expect(hook.radiusScale).toBeLessThan(1.4);
 });
 
-test('aura toggle updates projector and server state', async ({ page }) => {
-  const phone = await connectPhone();
-  await calibrateCenter(phone, { beta: 90, gamma: 0 });
-  await page.goto(`${getBaseUrl()}/?test=1`);
-  await waitForTestHook(page);
-
-  await emitEffectAura(phone, true);
-  await sleep(100);
-
-  let hook = await page.evaluate(() => window.__spotlightTestHook);
+test('B button toggles aura on and off', async ({ page }) => {
+  await tapButton(page, BUTTONS.AURA);
+  let hook = await getHook(page);
   expect(hook.auraActive).toBe(true);
-  expect(getState().auraActive).toBe(true);
 
-  await emitEffectAura(phone, false);
-  await sleep(100);
-
-  hook = await page.evaluate(() => window.__spotlightTestHook);
+  await tapButton(page, BUTTONS.AURA);
+  hook = await getHook(page);
   expect(hook.auraActive).toBe(false);
-  expect(getState().auraActive).toBe(false);
+});
 
-  phone.disconnect();
+test('Y button recenters the spotlight', async ({ page }) => {
+  await setAxes(page, 1, 1);
+  await sleep(400);
+  await setAxes(page, 0, 0);
+
+  let hook = await getHook(page);
+  expect(hook.pointerX).toBeGreaterThan(0.6);
+
+  await tapButton(page, BUTTONS.RECENTER);
+  await sleep(400);
+
+  hook = await getHook(page);
+  expect(hook.pointerX).toBeCloseTo(0.5, 2);
+  expect(hook.pointerY).toBeCloseTo(0.5, 2);
+  expect(hook.currentX).toBeGreaterThan(600);
+  expect(hook.currentX).toBeLessThan(680);
 });
