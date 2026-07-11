@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Gyro Spotlight — Projector</title>
+  <title>Gamepad Spotlight</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: #000; overflow: hidden; cursor: none; }
@@ -14,9 +14,9 @@
       display: none;
     }
 
-    .overlay {
+    #connect-view {
       position: fixed; inset: 0;
-      display: none;
+      display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
@@ -27,116 +27,45 @@
       padding: 2rem;
       cursor: default;
     }
-    .overlay.visible { display: flex; }
-
-    #qr-img {
-      width: min(60vh, 60vw);
-      height: min(60vh, 60vw);
-      background: #fff;
-      padding: 1.5rem;
-      border-radius: 1rem;
-    }
-    .overlay h1 { font-size: clamp(1.5rem, 4vw, 2.5rem); font-weight: 600; }
-    .overlay p  { font-size: clamp(0.95rem, 2vw, 1.2rem); color: #999; max-width: 42rem; line-height: 1.5; }
-
-    #disconnect-banner {
-      position: fixed; top: 2rem; left: 50%;
-      transform: translateX(-50%);
-      background: rgba(180, 30, 30, 0.9);
-      color: #fff;
-      padding: 0.75rem 1.5rem;
-      border-radius: 0.5rem;
-      font-size: 1.1rem;
-      display: none;
-    }
-    #disconnect-banner.visible { display: block; }
-
-    #cal-crosshair {
-      position: fixed; inset: 0;
-      display: none;
-      pointer-events: none;
-    }
-    #cal-crosshair.visible { display: block; }
-    #cal-crosshair::before, #cal-crosshair::after {
-      content: '';
-      position: absolute;
-      background: rgba(255, 255, 255, 0.35);
-    }
-    #cal-crosshair::before {
-      left: 50%; top: 0; bottom: 0;
-      width: 2px; transform: translateX(-50%);
-    }
-    #cal-crosshair::after {
-      top: 50%; left: 0; right: 0;
-      height: 2px; transform: translateY(-50%);
-    }
-    #cal-crosshair span {
-      position: absolute;
-      top: 50%; left: 50%;
-      transform: translate(-50%, calc(-50% - 2.5rem));
-      color: rgba(255, 255, 255, 0.6);
-      font-size: 1rem;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-    }
+    #connect-view.hidden { display: none; }
+    #connect-view .icon { font-size: clamp(4rem, 12vw, 8rem); }
+    #connect-view h1 { font-size: clamp(1.5rem, 4vw, 2.5rem); font-weight: 600; }
+    #connect-view p  { font-size: clamp(0.95rem, 2vw, 1.2rem); color: #999; max-width: 42rem; line-height: 1.5; }
   </style>
 </head>
 <body>
-  <div id="setup-view" class="overlay visible">
-    <img id="qr-img" alt="QR code to pair phone" />
-    <h1>Scan with Phone to Pair</h1>
-    <p id="mobile-url"></p>
-    <p style="color:#666;font-size:0.9rem;">Point phone at screen center → Calibrate → aim like a laser.</p>
+  <div id="connect-view">
+    <div class="icon">🎮</div>
+    <h1>Connect a Controller</h1>
+    <p>Plug in or pair a gamepad, then <strong style="color:#fff">press any button</strong> to start.</p>
+    <p style="color:#666;font-size:0.9rem;">
+      Left stick moves the spotlight &middot; A&nbsp;Burst &middot; X&nbsp;(hold)&nbsp;Expand &middot; B&nbsp;Aura &middot; Y&nbsp;Recenter
+    </p>
   </div>
-
-  <div id="cal-view" class="overlay">
-    <h1>Laser Pointer Calibration</h1>
-    <p>On the phone: point at the <strong style="color:#fff">center</strong> of this screen, then tap <strong style="color:#fff">Calibrate Center</strong>.</p>
-  </div>
-
-  <div id="cal-crosshair"><span>Point here</span></div>
 
   <canvas id="spotlight-canvas"></canvas>
-  <div id="disconnect-banner">Connection lost &mdash; waiting for phone&hellip;</div>
 
-  <script src="/orientation-map.js"></script>
-  <script src="/socket.io/socket.io.js"></script>
   <script>
     'use strict';
 
-    const socket = io();
     const isTestMode = new URLSearchParams(window.location.search).get('test') === '1';
 
-    const setupView = document.getElementById('setup-view');
-    const calView = document.getElementById('cal-view');
-    const calCrosshair = document.getElementById('cal-crosshair');
+    const connectView = document.getElementById('connect-view');
     const canvas = document.getElementById('spotlight-canvas');
-    const disconnectBanner = document.getElementById('disconnect-banner');
     const ctx = canvas.getContext('2d');
 
-    const DISCONNECT_HOLD_MS = 5000;
-    const FADE_DURATION_MS = 1000;
+    // ---- Tunables --------------------------------------------------------
+    const MOVE_SPEED = 1.1;       // full-deflection travel, screen-fractions/sec
+    const STICK_DEADZONE = 0.12;  // radial dead zone (drift rejection)
+    const STICK_EXPO = 1.6;       // >1 = finer control near center
+    const INVERT_Y = false;       // flip if your controller's Y axis feels backwards
+    const FOLLOW_RATE = 28;       // spotlight easing toward the pointer
 
-    let state = null;
-    let orientation = { beta: 90, gamma: 0, alpha: 0, t: null };
-    let pointerX = 0.5;
-    let pointerY = 0.5;
-    let currentX = null;
-    let currentY = null;
-    let sensX = 58;
-    let sensY = 52;
-    let invertX = true;
-    let invertY = true;
-    let deadZoneX = 0;
-    let deadZoneY = 0;
-    let pointerFollowRate = 28;
-    let useOneEuro = true;
-    let oneEuroMinCutoffX = 3.5;
-    let oneEuroMinCutoffY = 3.5;
-    let oneEuroBeta = 2.5;
-    let oneEuroDCutoff = 1.0;
-    let disconnectedAt = null;
-    let lastDrawTime = performance.now();
+    // Standard gamepad mapping (Xbox layout)
+    const BTN_BURST = 0;    // A
+    const BTN_AURA = 1;     // B
+    const BTN_EXPAND = 2;   // X (hold)
+    const BTN_RECENTER = 3; // Y
 
     const EXPAND_TARGET_SCALE = 2.5;
     const EXPAND_SPRING_RATE = 12;
@@ -144,75 +73,29 @@
     const BURST_PARTICLE_COUNT = 40;
     const AURA_EMBER_COUNT = 20;
 
+    // ---- State -----------------------------------------------------------
+    let pointerX = 0.5;
+    let pointerY = 0.5;
+    let currentX = null;
+    let currentY = null;
+    let lastDrawTime = performance.now();
+
+    let gamepadConnected = false;
+    let prevButtons = [];
+
     let expandActive = false;
     let auraActive = false;
     let radiusScale = 1;
     let bursts = [];
     let auraPhase = 0;
 
-    class OneEuro {
-      constructor({ minCutoff, beta, dCutoff }) {
-        this.minCutoff = minCutoff;
-        this.beta = beta;
-        this.dCutoff = dCutoff;
-        this.x = null;
-        this.dx = 0;
-        this.tPrev = null;
-      }
-
-      reset(value) {
-        this.x = value ?? null;
-        this.dx = 0;
-        this.tPrev = null;
-      }
-
-      alpha(cutoff, dt) {
-        const tau = 1 / (2 * Math.PI * cutoff);
-        return 1 / (1 + tau / dt);
-      }
-
-      filter(value, t) {
-        if (this.tPrev === null) {
-          this.x = value;
-          this.tPrev = t;
-          return value;
-        }
-        const dt = Math.max((t - this.tPrev) / 1000, 1 / 120);
-        this.tPrev = t;
-        const aD = this.alpha(this.dCutoff, dt);
-        const dx = (value - this.x) / dt;
-        this.dx = aD * dx + (1 - aD) * this.dx;
-        const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
-        const a = this.alpha(cutoff, dt);
-        this.x = a * value + (1 - a) * this.x;
-        return this.x;
-      }
-    }
-
-    const euroX = new OneEuro({ minCutoff: oneEuroMinCutoffX, beta: oneEuroBeta, dCutoff: oneEuroDCutoff });
-    const euroY = new OneEuro({ minCutoff: oneEuroMinCutoffY, beta: oneEuroBeta, dCutoff: oneEuroDCutoff });
-
     function clamp(v, lo, hi) {
       return Math.min(hi, Math.max(lo, v));
-    }
-
-    function applyMicroDeadZone(delta, zone) {
-      if (zone <= 0) return delta;
-      const abs = Math.abs(delta);
-      if (abs <= zone) return 0;
-      return Math.sign(delta) * (abs - zone);
     }
 
     function smoothFollow(current, target, rate, dt) {
       const alpha = 1 - Math.exp(-rate * dt);
       return current + (target - current) * alpha;
-    }
-
-    function resetPointerToCenter() {
-      pointerX = 0.5;
-      pointerY = 0.5;
-      euroX.reset(0.5);
-      euroY.reset(0.5);
     }
 
     function resizeCanvas() {
@@ -224,127 +107,70 @@
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
-    function applySettings(settings) {
-      if (!settings) return;
-      sensX = settings.pointerSensitivityX ?? sensX;
-      sensY = settings.pointerSensitivityY ?? sensY;
-      invertX = settings.invertX ?? invertX;
-      invertY = settings.invertY ?? invertY;
-      deadZoneX = settings.deadZoneX ?? deadZoneX;
-      deadZoneY = settings.deadZoneY ?? deadZoneY;
-      pointerFollowRate = settings.pointerFollowRate ?? pointerFollowRate;
-      useOneEuro = settings.useOneEuro ?? useOneEuro;
-      oneEuroMinCutoffX = settings.oneEuroMinCutoffX ?? oneEuroMinCutoffX;
-      oneEuroMinCutoffY = settings.oneEuroMinCutoffY ?? oneEuroMinCutoffY;
-      oneEuroBeta = settings.oneEuroBeta ?? oneEuroBeta;
-      oneEuroDCutoff = settings.oneEuroDCutoff ?? oneEuroDCutoff;
-      euroX.minCutoff = oneEuroMinCutoffX;
-      euroX.beta = oneEuroBeta;
-      euroX.dCutoff = oneEuroDCutoff;
-      euroY.minCutoff = oneEuroMinCutoffY;
-      euroY.beta = oneEuroBeta;
-      euroY.dCutoff = oneEuroDCutoff;
+    // ---- Gamepad input ---------------------------------------------------
+    function activeGamepad() {
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      for (const gp of pads) {
+        if (gp && gp.connected) return gp;
+      }
+      return null;
     }
 
-    function computePointerFromOrientation(w, h) {
-      if (!state || !state.isCalibrated || state.centerBeta == null) {
-        return { x: w / 2, y: h / 2, pctX: 0.5, pctY: 0.5 };
+    function applyStickCurve(ax, ay) {
+      const mag = Math.hypot(ax, ay);
+      if (mag < STICK_DEADZONE) return { x: 0, y: 0 };
+      const scaled = Math.pow((mag - STICK_DEADZONE) / (1 - STICK_DEADZONE), STICK_EXPO);
+      return { x: (ax / mag) * scaled, y: (ay / mag) * scaled };
+    }
+
+    function readGamepad(dt, now) {
+      const gp = activeGamepad();
+      const wasConnected = gamepadConnected;
+      gamepadConnected = !!gp;
+      if (gamepadConnected !== wasConnected) renderViews();
+      if (!gp) {
+        prevButtons = [];
+        return;
       }
 
-      const { panDeg, tiltDeg } = OrientationMap.computeDecoupledAnglesDeg(
-        {
-          alpha: orientation.alpha ?? 0,
-          beta: orientation.beta,
-          gamma: orientation.gamma,
-        },
-        {
-          alpha: state.centerAlpha ?? 0,
-          beta: state.centerBeta,
-          gamma: state.centerGamma,
-        }
-      );
+      const stick = applyStickCurve(gp.axes[0] || 0, gp.axes[1] || 0);
+      const ySign = INVERT_Y ? -1 : 1;
+      pointerX = clamp(pointerX + stick.x * MOVE_SPEED * dt, 0, 1);
+      pointerY = clamp(pointerY + stick.y * ySign * MOVE_SPEED * dt, 0, 1);
 
-      const signX = invertX ? -1 : 1;
-      const signY = invertY ? -1 : 1;
-      const dx = applyMicroDeadZone(signX * panDeg, deadZoneX);
-      const dy = applyMicroDeadZone(signY * tiltDeg, deadZoneY);
+      const pressed = (i) => !!(gp.buttons[i] && gp.buttons[i].pressed);
+      const edge = (i) => pressed(i) && !prevButtons[i];
 
-      const pctX = clamp(0.5 + dx * (sensX / w), 0, 1);
-      const pctY = clamp(0.5 + dy * (sensY / h), 0, 1);
-      return { x: pctX * w, y: pctY * h, pctX, pctY };
+      if (edge(BTN_BURST)) {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        spawnBurst(currentX ?? pointerX * w, currentY ?? pointerY * h, now);
+      }
+      expandActive = pressed(BTN_EXPAND);
+      if (edge(BTN_AURA)) auraActive = !auraActive;
+      if (edge(BTN_RECENTER)) {
+        pointerX = 0.5;
+        pointerY = 0.5;
+      }
+
+      prevButtons = gp.buttons.map((b) => b.pressed);
     }
 
     function renderViews() {
-      const phoneUp = state && state.isPhoneConnected;
-      const calibrated = state && state.isCalibrated;
-      const wasLive = disconnectedAt !== null && calibrated;
-      const showCanvas = phoneUp && calibrated;
-      const needsCal = phoneUp && !calibrated;
-
-      setupView.classList.toggle('visible', !phoneUp && !wasLive);
-      calView.classList.toggle('visible', needsCal);
-      calCrosshair.classList.toggle('visible', needsCal);
-      canvas.style.display = showCanvas || wasLive ? 'block' : 'none';
-
-      disconnectBanner.classList.toggle(
-        'visible',
-        wasLive && !phoneUp && performance.now() - disconnectedAt > DISCONNECT_HOLD_MS
-      );
+      connectView.classList.toggle('hidden', gamepadConnected);
+      canvas.style.display = gamepadConnected ? 'block' : 'none';
     }
 
-    socket.on('init', ({ state: s, qrDataUrl, mobileUrl }) => {
-      state = s;
-      applySettings(s.settings);
-      auraActive = !!s.auraActive;
-      expandActive = !!s.expandActive;
-      if (qrDataUrl) document.getElementById('qr-img').src = qrDataUrl;
-      if (mobileUrl) document.getElementById('mobile-url').textContent = mobileUrl;
-      if (s.isPhoneConnected) disconnectedAt = null;
+    window.addEventListener('gamepadconnected', () => {
+      gamepadConnected = true;
+      renderViews();
+    });
+    window.addEventListener('gamepaddisconnected', () => {
+      gamepadConnected = !!activeGamepad();
       renderViews();
     });
 
-    socket.on('orientation_update', (data) => {
-      orientation = data;
-    });
-
-    socket.on('recenter', () => {
-      resetPointerToCenter();
-    });
-
-    socket.on('state_update', (s) => {
-      const wasConnected = state && state.isPhoneConnected;
-      state = s;
-      applySettings(s.settings);
-      if (s.isPhoneConnected) disconnectedAt = null;
-      else if (wasConnected) disconnectedAt = performance.now();
-      renderViews();
-    });
-
-    socket.on('state_update', (s) => {
-      const wasConnected = state && state.isPhoneConnected;
-      state = s;
-      applySettings(s.settings);
-      auraActive = !!s.auraActive;
-      if (!s.isPhoneConnected) expandActive = false;
-      else expandActive = !!s.expandActive;
-      if (s.isPhoneConnected) disconnectedAt = null;
-      else if (wasConnected) disconnectedAt = performance.now();
-      renderViews();
-    });
-
-    socket.on('effect_burst', () => {
-      if (currentX === null || currentY === null) return;
-      spawnBurst(currentX, currentY, performance.now());
-    });
-
-    socket.on('effect_expand', ({ active }) => {
-      expandActive = !!active;
-    });
-
-    socket.on('effect_aura', ({ active }) => {
-      auraActive = !!active;
-    });
-
+    // ---- Effects ---------------------------------------------------------
     function spawnBurst(x, y, now) {
       const particles = [];
       for (let i = 0; i < BURST_PARTICLE_COUNT; i++) {
@@ -480,91 +306,60 @@
       ctx.fill();
     }
 
+    // ---- Main loop -------------------------------------------------------
+    function publishTestHook() {
+      window.__spotlightTestHook = {
+        currentX,
+        currentY,
+        pointerX,
+        pointerY,
+        canvasVisible: canvas.style.display !== 'none',
+        gamepadConnected,
+        radiusScale,
+        activeBurstCount: bursts.length,
+        auraActive,
+        expandActive,
+      };
+    }
+
     function draw(now) {
       requestAnimationFrame(draw);
 
       const dt = Math.min(Math.max((now - lastDrawTime) / 1000, 1 / 240), 0.05);
       lastDrawTime = now;
 
+      readGamepad(dt, now);
+
+      if (isTestMode) publishTestHook();
+      if (!gamepadConnected) return;
+
       const w = window.innerWidth;
       const h = window.innerHeight;
-      const aimed = computePointerFromOrientation(w, h);
-      let targetPctX = aimed.pctX;
-      let targetPctY = aimed.pctY;
-
-      if (useOneEuro) {
-        targetPctX = clamp(euroX.filter(targetPctX, now), 0, 1);
-        targetPctY = clamp(euroY.filter(targetPctY, now), 0, 1);
-      }
-
-      pointerX = targetPctX;
-      pointerY = targetPctY;
-
-      if (isTestMode) {
-        window.__spotlightTestHook = {
-          currentX,
-          currentY,
-          pointerX,
-          pointerY,
-          canvasVisible: canvas.style.display !== 'none',
-          isCalibrated: state && state.isCalibrated,
-        };
-      }
-
-      if (canvas.style.display === 'none') return;
-
-      let targetX = pointerX * w;
-      let targetY = pointerY * h;
-
-      if (disconnectedAt !== null) {
-        targetX = currentX ?? w / 2;
-        targetY = currentY ?? h / 2;
-        renderViews();
-      }
+      const targetX = pointerX * w;
+      const targetY = pointerY * h;
 
       if (currentX === null) currentX = targetX;
       if (currentY === null) currentY = targetY;
 
-      currentX = clamp(smoothFollow(currentX, targetX, pointerFollowRate, dt), 0, w);
-      currentY = clamp(smoothFollow(currentY, targetY, pointerFollowRate, dt), 0, h);
+      currentX = clamp(smoothFollow(currentX, targetX, FOLLOW_RATE, dt), 0, w);
+      currentY = clamp(smoothFollow(currentY, targetY, FOLLOW_RATE, dt), 0, h);
 
       const expandTarget = expandActive ? EXPAND_TARGET_SCALE : 1;
       radiusScale = smoothFollow(radiusScale, expandTarget, EXPAND_SPRING_RATE, dt);
 
       cullBursts(now);
 
-      let intensity = 1;
-      if (disconnectedAt !== null) {
-        const sinceDrop = now - disconnectedAt;
-        if (sinceDrop > DISCONNECT_HOLD_MS) {
-          intensity = clamp(1 - (sinceDrop - DISCONNECT_HOLD_MS) / FADE_DURATION_MS, 0, 1);
-        }
-      }
-
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, w, h);
 
-      if (intensity > 0) {
-        drawBursts(w, h, now, intensity);
-        if (auraActive) drawAura(currentX, currentY, w, h, now, intensity);
-        drawSpot(currentX, currentY, w, h, intensity, radiusScale);
-      }
+      drawBursts(w, h, now, 1);
+      if (auraActive) drawAura(currentX, currentY, w, h, now, 1);
+      drawSpot(currentX, currentY, w, h, 1, radiusScale);
 
-      if (isTestMode) {
-        window.__spotlightTestHook = {
-          currentX,
-          currentY,
-          pointerX,
-          pointerY,
-          canvasVisible: canvas.style.display !== 'none',
-          isCalibrated: state && state.isCalibrated,
-          radiusScale,
-          activeBurstCount: bursts.length,
-          auraActive,
-          expandActive,
-        };
-      }
+      if (isTestMode) publishTestHook();
     }
+
+    renderViews();
     requestAnimationFrame(draw);
   </script>
 </body>

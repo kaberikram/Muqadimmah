@@ -6,7 +6,9 @@ module.exports = defineConfig({
   retries: 0,
   workers: 1,
   use: {
-    ignoreHTTPSErrors: true,
     viewport: { width: 1280, height: 720 },
+    launchOptions: process.env.PW_CHROMIUM_PATH
+      ? { executablePath: process.env.PW_CHROMIUM_PATH }
+      : {},
   },
 });
