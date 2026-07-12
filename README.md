@@ -1,11 +1,12 @@
 # Gamepad Spotlight
 
-A fully static projection spotlight driven by a **gamepad** — one HTML file, no server, no pairing, no calibration. Plug in a controller and go.
+A fully static projection light show driven by a **gamepad** — one HTML file, no server, no pairing, no calibration. Plug in a controller and go. Every button does something; plug in a mic or audio interface and the whole scene breathes with the music.
 
 ## Stack
 
-- **Projector**: a single self-contained page (`public/index.html`) — vanilla JS + HTML5 2D Canvas
+- **Projector**: a single self-contained page (`public/index.html`) — vanilla JS, Three.js WebGPU/TSL particles, animejs for feel
 - **Input**: browser [Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), polled every animation frame
+- **Audio**: [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API) analyser over `getUserMedia` — any input device (built-in mic, USB audio interface) works
 
 ## Quick start
 
@@ -22,10 +23,32 @@ Connect a controller and **press any button** — browsers only expose a gamepad
 | Control | Action | Effect |
 | --- | --- | --- |
 | **Left stick** | Deflect | Moves the spotlight (velocity — it holds position when released) |
-| **A** | Tap | Burst — shockwave + sparks at the spotlight |
+| **Right stick** | Deflect | Aims the stand around the spot; leans embers/wisps into the wind |
+| **A** | Tap | Burst — shockwave + sparks (plus a stand barrage while the stand is out) |
+| **B** | Tap | Power aura — warm figure with breathing halo + rising embers |
 | **X** | Hold | Expand — spotlight grows ~2.5×, springs back on release |
-| **B** | Tap | Aura — toggle breathing halo + orbiting embers |
 | **Y** | Tap | Recenter — snap spotlight back to screen center |
+| **LB** | Tap | Ghost aura — cold spectral wisps + lagging afterimages of the spot |
+| **RB** | Tap | Stand — a violet second figure materializes beside the spot |
+| **LT** | Hold (analog) | Slow motion — dilates effect time, control stays real-time |
+| **RT** | Hold (analog) | Charge — particles spiral inward, spot pinches and overdrives; **release** detonates a nova scaled by charge |
+| **Select** | Tap | Audio-reactive mode — asks for mic/interface, scene pulses to the signal |
+| **Start** | Tap | HUD overlay — controls + live status (palette, bands, charge, time) |
+| **L3** | Tap | Blackout — instant fade to black (panic button for live use) |
+| **R3** | Tap | Strobe — beat-synced when audio is on, gentle 2 Hz pulse otherwise |
+| **D-pad ↑ / ↓** | Tap | Base spot size up / down |
+| **D-pad ← / →** | Tap | Cycle palette: SOLAR · SPECTRE · VENOM · CRIMSON · MONO |
+
+## Audio-reactive mode
+
+Press **Select** and grant microphone access — a USB audio interface shows up as a mic input, so you can feed it a board mix. The analyser splits the signal into bass / mid / treble:
+
+- **Bass** swells the spotlight radius and the aura figure
+- **Mids** fatten the particle grain
+- **Treble** drives the shimmer displacement on the aura, ghost, and stand
+- **Beats** (bass flux) fire a soft ripple ring from the spot — and the strobe, if it's armed
+
+Press Select again to release the device.
 
 ## Feel & tuning
 
@@ -40,7 +63,10 @@ Tunables at the top of the script in `public/index.html`:
 | `STICK_EXPO` | `1.6` | Response curve; >1 = finer control near center |
 | `INVERT_Y` | `false` | Flip if up/down feels backwards on your controller |
 | `FOLLOW_RATE` | `28` | Spotlight easing (higher = snappier) |
-| `BTN_*` | `0/1/2/3` | Button indices — remap effects here |
+| `CHARGE_RATE` | `0.9` | Charge per second at full RT pull |
+| `SLOWMO_DEPTH` | `0.78` | Full LT pull slows effect time to 1 − this |
+| `RADIUS_BASE_*` | — | Spot size default / step / clamps for the D-pad |
+| `BTN_*` | `0–15` | Button indices — remap everything here |
 
 ## Tests
 
@@ -49,4 +75,4 @@ npm install
 npm test
 ```
 
-Playwright loads the page over `file://` with a mock gamepad injected, then drives the stick and buttons to verify movement, hold, dead zone, clamping, and every effect.
+Playwright loads the page over `file://` with a mock gamepad injected, then drives both sticks, the triggers, and every button to verify movement, dead zone, clamping, charge/nova, slow-mo, palettes, blackout, strobe, HUD, audio toggle, and each effect.

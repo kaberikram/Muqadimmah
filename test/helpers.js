@@ -46,6 +46,16 @@ function setAxes(page, x, y) {
   );
 }
 
+function setRightStick(page, x, y) {
+  return page.evaluate(
+    ([ax, ay]) => {
+      window.__mockGamepad.axes[2] = ax;
+      window.__mockGamepad.axes[3] = ay;
+    },
+    [x, y]
+  );
+}
+
 function setButton(page, index, down) {
   return page.evaluate(
     ([i, pressed]) => {
@@ -108,6 +118,18 @@ const BUTTONS = {
   AURA: 1, // B
   EXPAND: 2, // X
   RECENTER: 3, // Y
+  GHOST: 4, // LB
+  STAND: 5, // RB
+  SLOWMO: 6, // LT (analog)
+  CHARGE: 7, // RT (analog)
+  AUDIO: 8, // Select
+  HUD: 9, // Start
+  BLACKOUT: 10, // L3
+  STROBE: 11, // R3
+  DPAD_UP: 12,
+  DPAD_DOWN: 13,
+  DPAD_LEFT: 14,
+  DPAD_RIGHT: 15,
 };
 
 module.exports = {
@@ -117,6 +139,7 @@ module.exports = {
   installMockGamepad,
   openProjector,
   setAxes,
+  setRightStick,
   setButton,
   tapButton,
   getHook,
