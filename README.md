@@ -1,142 +1,52 @@
-# Gyro Spotlight Tracker
+# Gamepad Spotlight
 
-A lightweight, pure-web projection-mapping system: a performer walks left and right
-across a ~3.5 m stage while a canvas spotlight on the projected screen tracks their
-position. The phone stays **in a pocket**; orientation streams over Socket.IO on
-local Wi-Fi — no internet required at show time.
+A fully static projection spotlight driven by a **gamepad** — one HTML file, no server, no pairing, no calibration. Plug in a controller and go.
 
 ## Stack
 
-- **Server**: Node.js + Express + Socket.IO (relay + shared state)
-- **Desktop renderer**: vanilla JS + HTML5 2D Canvas, full screen
-- **Mobile transmitter**: vanilla JS + Tailwind CSS (vendored locally in
-  `public/vendor/tailwind.js`, so everything works offline)
-- **Pairing**: QR code generated at boot from the machine's LAN IP
-
-## Two-screen setup
-
-```
-Projector / TV  →  https://<lan-ip>:3000/        (QR, preview, spotlight)
-Laptop operator →  https://<lan-ip>:3000/operator  (calibration wizard)
-iPhone          →  https://<lan-ip>:3000/mobile    (sensors only, then pocket)
-```
-
-The **projector** never shows calibration buttons — only the QR code, a dim
-preview dot during calibration, and the live spotlight.
-
-The **laptop** runs the operator page: confirm positions, verification walk, Start Show.
-
-## Standard projector layout
-
-```
-        [ Screen — UPSTAGE / back wall ]
-              ↑ projected image
-              
-   L -------- C -------- R   ← performer walks this line (downstage)
-              
-        [ Audience — DOWNSTAGE ]
-              
-   [ Projector + laptop — at back ]
-```
-
-## How pocket tracking works
-
-The phone reads orientation (compass + tilt). That only changes with position if
-your **body faces the audience center** — the normal performance stance.
-
-The app samples **alpha, beta, and gamma** in the pocket at **four stage marks**,
-auto-picks the best axis, and uses **gyro assist** during the show to smooth pocket jitter.
+- **Projector**: a single self-contained page (`public/index.html`) — vanilla JS + HTML5 2D Canvas
+- **Input**: browser [Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), polled every animation frame
 
 ## Quick start
 
+Open `public/index.html` directly in Chrome (double-click / `file://` works), or serve it:
+
+```bash
+npm start   # npx serve public
+```
+
+Connect a controller and **press any button** — browsers only expose a gamepad after the first input.
+
+## Controls (Xbox layout, standard mapping)
+
+| Control | Action | Effect |
+| --- | --- | --- |
+| **Left stick** | Deflect | Moves the spotlight (velocity — it holds position when released) |
+| **A** | Tap | Burst — shockwave + sparks at the spotlight |
+| **X** | Hold | Expand — spotlight grows ~2.5×, springs back on release |
+| **B** | Tap | Aura — toggle breathing halo + orbiting embers |
+| **Y** | Tap | Recenter — snap spotlight back to screen center |
+
+## Feel & tuning
+
+Movement is a **velocity model**: stick deflection sets speed and direction, so you can park the spot on a performer and let go. A radial dead zone rejects stick drift, and an expo curve gives fine control near center with fast sweeps at full deflection.
+
+Tunables at the top of the script in `public/index.html`:
+
+| Constant | Default | Meaning |
+| --- | --- | --- |
+| `MOVE_SPEED` | `1.1` | Full-deflection travel, in screen-widths per second |
+| `STICK_DEADZONE` | `0.12` | Radial dead zone (raise if the spot drifts on its own) |
+| `STICK_EXPO` | `1.6` | Response curve; >1 = finer control near center |
+| `INVERT_Y` | `false` | Flip if up/down feels backwards on your controller |
+| `FOLLOW_RATE` | `28` | Spotlight easing (higher = snappier) |
+| `BTN_*` | `0/1/2/3` | Button indices — remap effects here |
+
+## Tests
+
 ```bash
 npm install
-npm start
+npm test
 ```
 
-Console output:
-
-```
-Desktop (projector): https://192.168.x.x:3000/
-Operator (laptop):   https://192.168.x.x:3000/operator
-Mobile  (performer): https://192.168.x.x:3000/mobile
-```
-
-### 1. Phone (once)
-
-- Scan QR on projector → **Activate Motion Sensors** → pocket the phone.
-- Artist does not touch the phone again.
-
-### 2. Laptop — operator page (`/operator`)
-
-Four-step calibration with **averaged pocket samples** on each Confirm:
-
-| Step | Artist stands at | Operator action |
-| --- | --- | --- |
-| 1 | Left edge | Confirm (or Space) |
-| 2 | Left of center | Confirm |
-| 3 | Right of center | Confirm |
-| 4 | Right edge | Confirm |
-
-At each mark: face audience center, hold still ~1 s while the server averages readings.
-
-**Verification walk:** artist slowly walks left → right. Operator watches the
-**projector** spotlight, then clicks **Start Show**.
-
-### 3. Show
-
-Walk the stage — spotlight follows. Same pocket, face audience center.
-
-## Projector during calibration
-
-While the operator calibrates on the laptop, the projector shows:
-
-- **Dashed target line** at the current mark (where the artist should stand)
-- **Dim preview dot** at the mapped position from confirmed marks so far
-
-During verification and live show, the full spotlight appears.
-
-## Maximizing pocket accuracy
-
-| Do | Why |
-| --- | --- |
-| **Same pocket every time** | Consistent orientation signature |
-| **Face audience center** at each mark | Creates heading spread across stage width |
-| **Hold still before Confirm** | Server averages ~0.8 s of pocket readings |
-| **Verification walk** before Start Show | Catch bad calibration before the audience |
-| **Operator on `/operator`, not projector** | Artist never sees calibration UI |
-
-| Avoid | Why |
-| --- | --- |
-| Facing only upstage (screen) | Heading stays constant — tracking fails |
-| Switching pockets mid-show | Breaks mapping |
-| Confirming before artist is still | Noisy averaged snapshot |
-
-## Tracking modes
-
-### Stage Walk (primary)
-
-Pocket-based horizontal tracking with 4-point laptop calibration, verification
-step, multi-axis mapping, and gyro+compass fusion.
-
-### Pointer (experimental)
-
-Hand-held laser-pointer aim. Calibrated on the phone.
-
-## Configuration
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `PORT` | `3000` | HTTPS port |
-
-Settings in `server.js` → `state.settings`:
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `stageSmoothingFactor` | `0.1` | Lerp per frame for stage walk |
-| `gyroCorrectionGain` | `0.03` | Compass pull on gyro fusion (lower = smoother, more lag) |
-
-### Why HTTPS?
-
-iOS requires a secure context for motion sensors and Wake Lock. Self-signed cert at
-boot; one-time trust on each device. Fully offline at show time.
+Playwright loads the page over `file://` with a mock gamepad injected, then drives the stick and buttons to verify movement, hold, dead zone, clamping, and every effect.

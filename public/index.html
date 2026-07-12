@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Gyro Spotlight — Projector</title>
+  <title>Gamepad Spotlight</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: #000; overflow: hidden; cursor: none; }
@@ -14,9 +14,9 @@
       display: none;
     }
 
-    .overlay {
+    #connect-view {
       position: fixed; inset: 0;
-      display: none;
+      display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
@@ -27,346 +27,701 @@
       padding: 2rem;
       cursor: default;
     }
-    .overlay.visible { display: flex; }
-
-    #qr-img {
-      width: min(60vh, 60vw);
-      height: min(60vh, 60vw);
-      background: #fff;
-      padding: 1.5rem;
-      border-radius: 1rem;
-    }
-    .overlay h1 { font-size: clamp(1.5rem, 4vw, 2.5rem); font-weight: 600; }
-    .overlay p  { font-size: clamp(0.95rem, 2vw, 1.2rem); color: #999; max-width: 42rem; line-height: 1.5; }
-    .overlay .operator-url { color: #666; font-size: 0.9rem; font-family: ui-monospace, monospace; }
-
-    #disconnect-banner {
-      position: fixed; top: 2rem; left: 50%;
-      transform: translateX(-50%);
-      background: rgba(180, 30, 30, 0.9);
-      color: #fff;
-      padding: 0.75rem 1.5rem;
-      border-radius: 0.5rem;
-      font-size: 1.1rem;
-      display: none;
-    }
-    #disconnect-banner.visible { display: block; }
-
-    #mode-badge {
-      position: fixed; bottom: 1.5rem; right: 1.5rem;
-      background: rgba(255, 255, 255, 0.08);
-      color: #666;
-      padding: 0.4rem 0.8rem;
-      border-radius: 0.4rem;
-      font-size: 0.85rem;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      display: none;
-    }
-    #mode-badge.visible { display: block; }
+    #connect-view.hidden { display: none; }
+    #connect-view .icon { font-size: clamp(4rem, 12vw, 8rem); }
+    #connect-view h1 { font-size: clamp(1.5rem, 4vw, 2.5rem); font-weight: 600; }
+    #connect-view p  { font-size: clamp(0.95rem, 2vw, 1.2rem); color: #999; max-width: 42rem; line-height: 1.5; }
   </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three/three.core.js",
+      "three/webgpu": "./vendor/three/three.webgpu.js",
+      "three/tsl": "./vendor/three/three.tsl.js",
+      "animejs": "./vendor/animejs/index.js",
+      "animejs/adapters/three": "./vendor/animejs/adapters/three/index.js"
+    }
+  }
+  </script>
 </head>
 <body>
-  <div id="setup-view" class="overlay visible">
-    <img id="qr-img" alt="QR code to pair phone" />
-    <h1>Scan with iPhone to Pair</h1>
-    <p id="mobile-url"></p>
-    <p class="operator-url">Operator calibrates at: <span id="operator-url"></span></p>
-  </div>
-
-  <div id="pointer-cal-view" class="overlay">
-    <h1>Pointer Calibration</h1>
-    <p>On the phone: aim at screen center and tap &ldquo;Set Screen Center&rdquo;.</p>
+  <div id="connect-view">
+    <div class="icon">🎮</div>
+    <h1>Connect a Controller</h1>
+    <p>Plug in or pair a gamepad, then <strong style="color:#fff">press any button</strong> to start.</p>
+    <p style="color:#666;font-size:0.9rem;">
+      Left stick moves the spotlight &middot; A&nbsp;Burst &middot; X&nbsp;(hold)&nbsp;Expand &middot; B&nbsp;Aura &middot; Y&nbsp;Recenter
+    </p>
   </div>
 
   <canvas id="spotlight-canvas"></canvas>
-  <div id="disconnect-banner">Connection lost &mdash; waiting for phone&hellip;</div>
-  <div id="mode-badge"></div>
 
-  <script src="/socket.io/socket.io.js"></script>
-  <script>
+  <script type="module">
     'use strict';
 
-    const socket = io();
+    import * as THREE from 'three/webgpu';
+    import {
+      Fn, uniform, attribute, time, positionLocal, vec3, mx_fractal_noise_vec3,
+    } from 'three/tsl';
+    import { animate } from 'animejs';
+    import 'animejs/adapters/three';
 
-    const setupView = document.getElementById('setup-view');
-    const pointerCalView = document.getElementById('pointer-cal-view');
+    const isTestMode = new URLSearchParams(window.location.search).get('test') === '1';
+
+    const connectView = document.getElementById('connect-view');
     const canvas = document.getElementById('spotlight-canvas');
-    const disconnectBanner = document.getElementById('disconnect-banner');
-    const modeBadge = document.getElementById('mode-badge');
-    const ctx = canvas.getContext('2d');
 
-    const DISCONNECT_HOLD_MS = 5000;
-    const FADE_DURATION_MS = 1000;
-    const MAX_ALPHA_JUMP_DEG = 20;
+    // ---- Tunables --------------------------------------------------------
+    const MOVE_SPEED = 1.1;       // full-deflection travel, screen-fractions/sec
+    const STICK_DEADZONE = 0.12;  // radial dead zone (drift rejection)
+    const STICK_EXPO = 1.6;       // >1 = finer control near center
+    const INVERT_Y = false;       // flip if your controller's Y axis feels backwards
+    const FOLLOW_RATE = 28;       // spotlight easing toward the pointer
 
-    let state = null;
-    let orientation = { alpha: 0, beta: 90, gamma: 0, rotationRate: null };
+    // Standard gamepad mapping (Xbox layout)
+    const BTN_BURST = 0;    // A
+    const BTN_AURA = 1;     // B
+    const BTN_EXPAND = 2;   // X (hold)
+    const BTN_RECENTER = 3; // Y
+
+    const EXPAND_TARGET_SCALE = 2.5;
+    const EXPAND_SPRING_RATE = 12;
+    const BURST_DURATION_MS = 1200;
+    const BURST_PARTICLE_COUNT = 40;
+    const BURST_POOL_SIZE = 8; // max concurrent bursts with visible ring/flash geometry
+
+    // Warm power-aura palette (matches the original 2D gradient stops)
+    const WARM_STOPS = [
+      { t: 0.0, r: 255, g: 240, b: 210 }, // white-hot core
+      { t: 0.5, r: 255, g: 210, b: 160 }, // amber
+      { t: 1.0, r: 205, g: 185, b: 255 }, // lavender rim
+    ];
+
+    function lerpWarm(t) {
+      t = clamp(t, 0, 1);
+      for (let i = 0; i < WARM_STOPS.length - 1; i++) {
+        const a = WARM_STOPS[i];
+        const b = WARM_STOPS[i + 1];
+        if (t >= a.t && t <= b.t) {
+          const localT = (t - a.t) / (b.t - a.t || 1);
+          return {
+            r: (a.r + (b.r - a.r) * localT) / 255,
+            g: (a.g + (b.g - a.g) * localT) / 255,
+            b: (a.b + (b.b - a.b) * localT) / 255,
+          };
+        }
+      }
+      const last = WARM_STOPS[WARM_STOPS.length - 1];
+      return { r: last.r / 255, g: last.g / 255, b: last.b / 255 };
+    }
+
+    // ---- State -----------------------------------------------------------
+    let pointerX = 0.5;
+    let pointerY = 0.5;
     let currentX = null;
     let currentY = null;
-    let smoothingFactor = 0.1;
-    let gyroCorrectionGain = 0.03;
-    let sensX = 50;
-    let sensY = 40;
-    let disconnectedAt = null;
-    let filteredAlpha = null;
-    let fusedValue = null;
-    let lastFrameTime = null;
+    let lastDrawTime = performance.now();
 
-    function angleDiff(a, b) {
-      return ((a - b + 540) % 360) - 180;
-    }
+    let gamepadConnected = false;
+    let prevButtons = [];
+
+    let expandActive = false;
+    let auraActive = false;
+    let radiusScale = 1;
+    let bursts = [];
+    let auraPhase = 0;
 
     function clamp(v, lo, hi) {
       return Math.min(hi, Math.max(lo, v));
     }
 
-    function axisDelta(axis, a, b) {
-      return axis === 'alpha' ? angleDiff(a, b) : a - b;
+    function smoothFollow(current, target, rate, dt) {
+      const alpha = 1 - Math.exp(-rate * dt);
+      return current + (target - current) * alpha;
     }
 
     function resizeCanvas() {
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(window.innerWidth * dpr);
-      canvas.height = Math.round(window.innerHeight * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (!renderer || !camera) return;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(w, h, false);
+      camera.left = 0;
+      camera.right = w;
+      camera.top = 0;
+      camera.bottom = h;
+      camera.updateProjectionMatrix();
+      if (flashMesh) {
+        flashMesh.geometry.dispose();
+        flashMesh.geometry = new THREE.PlaneGeometry(w, h);
+        flashMesh.position.set(w / 2, h / 2, -50);
+      }
     }
     window.addEventListener('resize', resizeCanvas);
-    resizeCanvas();
 
-    function applySettings(settings) {
-      if (!settings) return;
-      const mode = state && state.trackingMode;
-      smoothingFactor = mode === 'pointer'
-        ? (settings.pointerSmoothingFactor ?? smoothingFactor)
-        : (settings.stageSmoothingFactor ?? smoothingFactor);
-      gyroCorrectionGain = settings.gyroCorrectionGain ?? gyroCorrectionGain;
-      sensX = settings.pointerSensitivityX ?? sensX;
-      sensY = settings.pointerSensitivityY ?? sensY;
+    // ---- Gamepad input ---------------------------------------------------
+    function activeGamepad() {
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      for (const gp of pads) {
+        if (gp && gp.connected) return gp;
+      }
+      return null;
     }
 
-    function filterStageAlpha(alpha) {
-      if (filteredAlpha === null) {
-        filteredAlpha = alpha;
-        return alpha;
-      }
-      if (Math.abs(angleDiff(alpha, filteredAlpha)) > MAX_ALPHA_JUMP_DEG) return filteredAlpha;
-      filteredAlpha = alpha;
-      return alpha;
+    function applyStickCurve(ax, ay) {
+      const mag = Math.hypot(ax, ay);
+      if (mag < STICK_DEADZONE) return { x: 0, y: 0 };
+      const scaled = Math.pow((mag - STICK_DEADZONE) / (1 - STICK_DEADZONE), STICK_EXPO);
+      return { x: (ax / mag) * scaled, y: (ay / mag) * scaled };
     }
 
-    function mapMultiPointToPct(value, points, axis) {
-      const pts = points.filter((p) => p.snapshot);
-      if (pts.length < 2) return 0.5;
-
-      function val(p) { return p.snapshot[axis]; }
-
-      for (let i = 0; i < pts.length - 1; i++) {
-        const v0 = val(pts[i]);
-        const v1 = val(pts[i + 1]);
-        const span = axisDelta(axis, v1, v0);
-        if (Math.abs(span) < 0.001) continue;
-        const t = axisDelta(axis, value, v0) / span;
-        if (t >= 0 && t <= 1) {
-          return pts[i].pct + t * (pts[i + 1].pct - pts[i].pct);
-        }
+    function readGamepad(dt, now) {
+      const gp = activeGamepad();
+      const wasConnected = gamepadConnected;
+      gamepadConnected = !!gp;
+      if (gamepadConnected !== wasConnected) renderViews();
+      if (!gp) {
+        prevButtons = [];
+        return;
       }
 
-      const v0 = val(pts[0]);
-      const v1 = val(pts[1]);
-      const span0 = axisDelta(axis, v1, v0);
-      const pos0 = axisDelta(axis, value, v0);
-      if (Math.abs(span0) >= 0.001 && Math.sign(pos0) !== Math.sign(span0)) {
-        return clamp(pts[0].pct + (pos0 / span0) * (pts[1].pct - pts[0].pct), 0, 1);
+      const stick = applyStickCurve(gp.axes[0] || 0, gp.axes[1] || 0);
+      const ySign = INVERT_Y ? -1 : 1;
+      pointerX = clamp(pointerX + stick.x * MOVE_SPEED * dt, 0, 1);
+      pointerY = clamp(pointerY + stick.y * ySign * MOVE_SPEED * dt, 0, 1);
+
+      const pressed = (i) => !!(gp.buttons[i] && gp.buttons[i].pressed);
+      const edge = (i) => pressed(i) && !prevButtons[i];
+
+      if (edge(BTN_BURST)) {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        spawnBurst(currentX ?? pointerX * w, currentY ?? pointerY * h, now);
+      }
+      expandActive = pressed(BTN_EXPAND);
+      if (edge(BTN_AURA)) {
+        auraActive = !auraActive;
+        setAuraFormationTarget(auraActive);
+      }
+      if (edge(BTN_RECENTER)) {
+        pointerX = 0.5;
+        pointerY = 0.5;
       }
 
-      const last = pts.length - 1;
-      const spanL = axisDelta(axis, val(pts[last]), val(pts[last - 1]));
-      const posL = axisDelta(axis, value, val(pts[last - 1]));
-      return clamp(pts[last - 1].pct + (posL / spanL) * (pts[last].pct - pts[last - 1].pct), 0, 1);
-    }
-
-    function getStageTrackingValue(axis, dt) {
-      const compass = orientation[axis];
-      const rate = orientation.rotationRate && orientation.rotationRate[axis];
-
-      if (rate == null || dt == null || dt <= 0) {
-        fusedValue = compass;
-        return axis === 'alpha' ? filterStageAlpha(compass) : compass;
-      }
-
-      if (fusedValue === null) fusedValue = compass;
-      fusedValue += rate * dt;
-      if (axis === 'alpha') {
-        fusedValue = (fusedValue + angleDiff(compass, fusedValue) * gyroCorrectionGain + 360) % 360;
-        return filterStageAlpha(fusedValue);
-      }
-      fusedValue += (compass - fusedValue) * gyroCorrectionGain;
-      return fusedValue;
+      prevButtons = gp.buttons.map((b) => b.pressed);
     }
 
     function renderViews() {
-      const phoneUp = state && state.isPhoneConnected;
-      const cal = state && state.calibration;
-      const phase = cal && cal.phase;
-      const mode = state && state.trackingMode;
-      const live = cal && cal.isCalibrated && (phoneUp || disconnectedAt !== null);
-      const showCanvas = phoneUp && (
-        (mode === 'stage' && (phase === 'marks' || phase === 'verify' || phase === 'live')) ||
-        (mode === 'pointer' && cal.isCalibrated) ||
-        live
-      );
-
-      setupView.classList.toggle('visible', !phoneUp && !live);
-      pointerCalView.classList.toggle('visible', mode === 'pointer' && phoneUp && !cal.isCalibrated);
-      canvas.style.display = showCanvas ? 'block' : 'none';
-
-      disconnectBanner.classList.toggle(
-        'visible',
-        live && !phoneUp && disconnectedAt !== null &&
-          performance.now() - disconnectedAt > DISCONNECT_HOLD_MS
-      );
-
-      const badgeLabels = { marks: 'Calibrating', verify: 'Verify', live: 'Stage Walk' };
-      modeBadge.textContent = mode === 'pointer' ? 'Pointer' : (badgeLabels[phase] || 'Stage Walk');
-      modeBadge.classList.toggle('visible', showCanvas && mode === 'stage');
+      connectView.classList.toggle('hidden', gamepadConnected);
+      canvas.style.display = gamepadConnected ? 'block' : 'none';
     }
 
-    socket.on('init', ({ state: s, qrDataUrl, mobileUrl, operatorUrl }) => {
-      state = s;
-      orientation = s.currentOrientation || orientation;
-      applySettings(s.settings);
-      if (qrDataUrl) document.getElementById('qr-img').src = qrDataUrl;
-      if (mobileUrl) document.getElementById('mobile-url').textContent = mobileUrl;
-      if (operatorUrl) document.getElementById('operator-url').textContent = operatorUrl;
-      if (s.isPhoneConnected) disconnectedAt = null;
+    window.addEventListener('gamepadconnected', () => {
+      gamepadConnected = true;
+      renderViews();
+    });
+    window.addEventListener('gamepaddisconnected', () => {
+      gamepadConnected = !!activeGamepad();
       renderViews();
     });
 
-    socket.on('state_update', (s) => {
-      const wasConnected = state && state.isPhoneConnected;
-      state = s;
-      applySettings(s.settings);
-      if (s.isPhoneConnected) disconnectedAt = null;
-      else if (wasConnected) disconnectedAt = performance.now();
-      if (!s.calibration.isCalibrated && s.calibration.phase === 'marks') {
-        filteredAlpha = null;
-        fusedValue = null;
+    // ---- Effects (state bookkeeping, unchanged from the 2D-canvas version) -
+    function spawnBurst(x, y, now) {
+      const particles = [];
+      for (let i = 0; i < BURST_PARTICLE_COUNT; i++) {
+        const angle = (Math.PI * 2 * i) / BURST_PARTICLE_COUNT + (Math.random() - 0.5) * 0.4;
+        const speed = 180 + Math.random() * 320;
+        particles.push({
+          angle,
+          speed,
+          size: 2 + Math.random() * 4,
+          life: 0.6 + Math.random() * 0.4,
+        });
       }
-      renderViews();
-    });
-
-    socket.on('orientation_update', (data) => {
-      orientation = data;
-    });
-
-    function computeTarget(w, h, dt) {
-      const cx = w / 2;
-      const cy = h / 2;
-      const cal = state && state.calibration;
-      if (!cal) return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none' };
-
-      if (state.trackingMode === 'pointer') {
-        if (!cal.isCalibrated) return { x: cx, y: cy, mode: 'none' };
-        const { centerAlpha, centerBeta } = cal;
-        return {
-          x: clamp(cx + angleDiff(orientation.alpha, centerAlpha) * sensX, 0, w),
-          y: clamp(cy + (orientation.beta - centerBeta) * sensY, 0, h),
-          mode: 'live',
-        };
-      }
-
-      const phase = cal.phase;
-      if (phase === 'marks') {
-        const axis = cal.mappingAxis || 'alpha';
-        const captured = cal.points.filter((p) => p.snapshot).length;
-        if (captured === 0) return { x: cx, y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5 };
-        const value = getStageTrackingValue(axis, dt);
-        const pct = mapMultiPointToPct(value, cal.points, axis);
-        return { x: clamp(pct * w, 0, w), y: cy, mode: 'marks', targetPct: cal.points[cal.currentStep]?.pct ?? 0.5 };
-      }
-
-      if (phase === 'verify' || phase === 'live') {
-        const axis = cal.mappingAxis || 'alpha';
-        const value = getStageTrackingValue(axis, dt);
-        const pct = mapMultiPointToPct(value, cal.points, axis);
-        return { x: clamp(pct * w, 0, w), y: cy, mode: phase === 'verify' ? 'verify' : 'live' };
-      }
-
-      return { x: currentX ?? cx, y: currentY ?? cy, mode: 'none' };
+      bursts.push({ x, y, startTime: now, particles });
+      shakeCamera();
     }
 
-    function drawSpot(x, y, w, h, intensity, scale) {
-      const radius = Math.min(w, h) * 0.22 * scale;
-      const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
-      g.addColorStop(0.0, `rgba(255, 255, 255, ${intensity})`);
-      g.addColorStop(0.5, `rgba(255, 255, 255, ${0.85 * intensity})`);
-      g.addColorStop(0.8, `rgba(255, 255, 255, ${0.25 * intensity})`);
-      g.addColorStop(1.0, 'rgba(255, 255, 255, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
+    function cullBursts(now) {
+      bursts = bursts.filter((b) => now - b.startTime < BURST_DURATION_MS);
     }
 
-    function drawTargetLine(w, h, pct) {
-      const x = pct * w;
-      ctx.setLineDash([8, 12]);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
-      ctx.stroke();
-      ctx.setLineDash([]);
+    function baseRadius(w, h) {
+      return Math.min(w, h) * 0.22;
+    }
+
+    // ---- WebGPU / TSL particle scene --------------------------------------
+    let renderer = null;
+    let scene = null;
+    let camera = null;
+    let spotlightGroup = null;
+    let figureGroup = null;
+    let emberGroup = null;
+    let burstGroup = null;
+    let flashMesh = null;
+    const auraIntensityUniform = uniform(0);
+
+    function makeGlowTexture() {
+      const size = 64;
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const cctx = c.getContext('2d');
+      const g = cctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+      g.addColorStop(0, 'rgba(255,255,255,1)');
+      g.addColorStop(0.4, 'rgba(255,255,255,0.65)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      cctx.fillStyle = g;
+      cctx.fillRect(0, 0, size, size);
+      const tex = new THREE.CanvasTexture(c);
+      tex.needsUpdate = true;
+      return tex;
+    }
+
+    function shimmerPositionNode() {
+      return Fn(() => {
+        const n = mx_fractal_noise_vec3(vec3(positionLocal.mul(0.01).add(vec3(0, 0, time.mul(0.4)))));
+        return positionLocal.add(n.mul(auraIntensityUniform.mul(9.0)));
+      })();
+    }
+
+    function makePointsMaterial(map, { shimmer = false } = {}) {
+      const material = new THREE.PointsNodeMaterial();
+      material.map = map;
+      material.vertexColors = true;
+      material.transparent = true;
+      material.depthWrite = false;
+      material.depthTest = false;
+      material.blending = THREE.AdditiveBlending;
+      material.sizeAttenuation = false;
+      material.sizeNode = attribute('aSize');
+      if (shimmer) material.positionNode = shimmerPositionNode();
+      return material;
+    }
+
+    function makePointsGroup(count, map, opts) {
+      const geometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(count * 3);
+      const colors = new Float32Array(count * 3);
+      const sizes = new Float32Array(count);
+      const seeds = new Float32Array(count);
+      for (let i = 0; i < count; i++) seeds[i] = Math.random();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+      geometry.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+      const material = makePointsMaterial(map, opts);
+      const points = new THREE.Points(geometry, material);
+      points.frustumCulled = false;
+      return { points, geometry, positions, colors, sizes, seeds, count };
+    }
+
+    function randomOnSphere() {
+      let x, y, z, len;
+      do {
+        x = Math.random() * 2 - 1;
+        y = Math.random() * 2 - 1;
+        z = Math.random() * 2 - 1;
+        len = x * x + y * y + z * z;
+      } while (len > 1 || len === 0);
+      len = Math.sqrt(len);
+      return { x: x / len, y: y / len, z: z / len };
+    }
+
+    // Abstract, minimal humanoid silhouette in a local unit space:
+    // y negative = up (head), y positive = down (feet). Scaled to pixels at render time.
+    function sampleBodyPart(name) {
+      switch (name) {
+        case 'head': {
+          const v = randomOnSphere();
+          return { x: v.x * 0.11, y: -0.78 + v.y * 0.11, z: v.z * 0.11, colorT: 0.05 + Math.random() * 0.15 };
+        }
+        case 'torso': {
+          const t = Math.random();
+          const y = -0.62 + t * 0.42;
+          const width = 0.10 + t * 0.06;
+          const a = Math.random() * Math.PI * 2;
+          return { x: Math.cos(a) * width, y, z: Math.sin(a) * width * 0.55, colorT: 0.1 + Math.random() * 0.25 };
+        }
+        case 'armL':
+        case 'armR': {
+          const side = name === 'armL' ? -1 : 1;
+          const t = Math.random();
+          const shoulderY = -0.55, fistY = -0.16;
+          const shoulderX = side * 0.16, fistX = side * 0.30;
+          const y = shoulderY + (fistY - shoulderY) * t;
+          const bend = Math.sin(t * Math.PI) * 0.05;
+          const x = shoulderX + (fistX - shoulderX) * t + side * bend;
+          const r = 0.035 * (1 - t * 0.3);
+          const a = Math.random() * Math.PI * 2;
+          return { x: x + Math.cos(a) * r, y, z: Math.sin(a) * r, colorT: 0.35 + Math.random() * 0.3 };
+        }
+        case 'legL':
+        case 'legR': {
+          const side = name === 'legL' ? -1 : 1;
+          const t = Math.random();
+          const hipY = -0.20, footY = 0.35;
+          const hipX = side * 0.06, footX = side * 0.14;
+          const y = hipY + (footY - hipY) * t;
+          const x = hipX + (footX - hipX) * t;
+          const r = 0.045 * (1 - t * 0.2);
+          const a = Math.random() * Math.PI * 2;
+          return { x: x + Math.cos(a) * r, y, z: Math.sin(a) * r, colorT: 0.4 + Math.random() * 0.35 };
+        }
+        default:
+          return { x: 0, y: 0, z: 0, colorT: 0 };
+      }
+    }
+
+    function buildFigureModel(count) {
+      const parts = [
+        { name: 'head', share: 0.10 },
+        { name: 'torso', share: 0.30 },
+        { name: 'armL', share: 0.12 },
+        { name: 'armR', share: 0.12 },
+        { name: 'legL', share: 0.18 },
+        { name: 'legR', share: 0.18 },
+      ];
+      const model = [];
+      for (const part of parts) {
+        const n = Math.round(count * part.share);
+        for (let i = 0; i < n; i++) {
+          const base = sampleBodyPart(part.name);
+          const scatter = randomOnSphere();
+          const scatterMag = 0.9 + Math.random() * 1.6;
+          model.push({
+            base,
+            scatter: { x: scatter.x * scatterMag, y: scatter.y * scatterMag, z: scatter.z * scatterMag },
+            size: 2 + Math.random() * 2.5,
+            colorT: base.colorT,
+          });
+        }
+      }
+      return model;
+    }
+
+    function buildEmberModel(count) {
+      const model = [];
+      for (let i = 0; i < count; i++) {
+        model.push({
+          seed: Math.random(),
+          speed: 0.5 + (i % 5) * 0.11,
+          orbit: 0.28 + (i % 7) * 0.05,
+          riseSpeed: 0.15 + (i % 4) * 0.05,
+          size: 1.5 + Math.random() * 2.5,
+        });
+      }
+      return model;
+    }
+
+    async function initRenderer() {
+      renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
+      await renderer.init();
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x000000);
+
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      camera = new THREE.OrthographicCamera(0, w, 0, h, -1000, 1000);
+      camera.position.z = 100;
+
+      const glowTex = makeGlowTexture();
+
+      // Spotlight core
+      const SPOTLIGHT_COUNT = 140;
+      spotlightGroup = makePointsGroup(SPOTLIGHT_COUNT, glowTex);
+      spotlightGroup.model = Array.from({ length: SPOTLIGHT_COUNT }, () => ({
+        r: Math.pow(Math.random(), 1.8),
+        a: Math.random() * Math.PI * 2,
+      }));
+      scene.add(spotlightGroup.points);
+
+      // Aura figure (abstract humanoid), gets the shimmering GPU displacement
+      const FIGURE_COUNT = 550;
+      figureGroup = makePointsGroup(FIGURE_COUNT, glowTex, { shimmer: true });
+      figureGroup.model = buildFigureModel(FIGURE_COUNT);
+      figureGroup.points.visible = false;
+      scene.add(figureGroup.points);
+
+      // Aura embers (rising flame licks around the figure)
+      const EMBER_COUNT = 90;
+      emberGroup = makePointsGroup(EMBER_COUNT, glowTex, { shimmer: true });
+      emberGroup.model = buildEmberModel(EMBER_COUNT);
+      emberGroup.points.visible = false;
+      scene.add(emberGroup.points);
+
+      // Burst sparks (shared pool across all concurrently active bursts)
+      const BURST_TOTAL = BURST_POOL_SIZE * BURST_PARTICLE_COUNT;
+      burstGroup = makePointsGroup(BURST_TOTAL, glowTex);
+      scene.add(burstGroup.points);
+
+      // Burst rings — pooled meshes, one pair per concurrent burst slot
+      burstGroup.rings = [];
+      for (let i = 0; i < BURST_POOL_SIZE; i++) {
+        const outerMat = new THREE.MeshBasicNodeMaterial({
+          color: 0xffffff, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, side: THREE.DoubleSide,
+        });
+        const innerMat = new THREE.MeshBasicNodeMaterial({
+          color: 0xffd8b0, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, side: THREE.DoubleSide,
+        });
+        const outer = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 48), outerMat);
+        const inner = new THREE.Mesh(new THREE.RingGeometry(0.8, 1, 48), innerMat);
+        outer.visible = inner.visible = false;
+        scene.add(outer, inner);
+        burstGroup.rings.push({ outer, inner });
+      }
+
+      // Fullscreen additive flash on burst impact
+      const flashMat = new THREE.MeshBasicNodeMaterial({
+        color: 0xffffff, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
+      });
+      flashMesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), flashMat);
+      flashMesh.position.set(w / 2, h / 2, -50);
+      scene.add(flashMesh);
+
+      resizeCanvas();
+    }
+
+    function updateSpotlight(cx, cy, w, h, scale) {
+      const radius = baseRadius(w, h) * scale;
+      const { positions, colors, sizes, model, count } = spotlightGroup;
+      for (let i = 0; i < count; i++) {
+        const { r, a } = model[i];
+        const dist = r * radius;
+        const idx3 = i * 3;
+        positions[idx3] = cx + Math.cos(a) * dist;
+        positions[idx3 + 1] = cy + Math.sin(a) * dist;
+        positions[idx3 + 2] = 0;
+        const falloff = 1 - r;
+        colors[idx3] = falloff;
+        colors[idx3 + 1] = falloff;
+        colors[idx3 + 2] = falloff;
+        sizes[i] = 1.5 + falloff * 5;
+      }
+      spotlightGroup.geometry.attributes.position.needsUpdate = true;
+      spotlightGroup.geometry.attributes.color.needsUpdate = true;
+      spotlightGroup.geometry.attributes.aSize.needsUpdate = true;
+    }
+
+    function updateFigure(cx, cy, w, h, formation, scale) {
+      const visible = formation > 0.001;
+      figureGroup.points.visible = visible;
+      if (!visible) return;
+
+      const figureScale = Math.min(w, h) * 0.42 * scale;
+      const scatterT = 1 - formation;
+      const { positions, colors, sizes, model, count } = figureGroup;
+      for (let i = 0; i < count; i++) {
+        const p = model[i];
+        const lx = p.base.x + p.scatter.x * scatterT;
+        const ly = p.base.y + p.scatter.y * scatterT;
+        const lz = p.base.z + p.scatter.z * scatterT;
+        const idx3 = i * 3;
+        positions[idx3] = cx + lx * figureScale;
+        positions[idx3 + 1] = cy + ly * figureScale;
+        positions[idx3 + 2] = lz * figureScale;
+        const c = lerpWarm(p.colorT);
+        const alpha = formation;
+        colors[idx3] = c.r * alpha;
+        colors[idx3 + 1] = c.g * alpha;
+        colors[idx3 + 2] = c.b * alpha;
+        sizes[i] = p.size;
+      }
+      figureGroup.geometry.attributes.position.needsUpdate = true;
+      figureGroup.geometry.attributes.color.needsUpdate = true;
+      figureGroup.geometry.attributes.aSize.needsUpdate = true;
+    }
+
+    function updateEmbers(cx, cy, w, h, formation, scale) {
+      const visible = formation > 0.001;
+      emberGroup.points.visible = visible;
+      if (!visible) return;
+
+      const figureScale = Math.min(w, h) * 0.42 * scale;
+      const { positions, colors, sizes, model, count } = emberGroup;
+      for (let i = 0; i < count; i++) {
+        const p = model[i];
+        const phase = auraPhase * p.speed + p.seed * Math.PI * 2;
+        const orbit = figureScale * p.orbit;
+        const riseT = (auraPhase * p.riseSpeed + p.seed) % 1;
+        const ex = cx + Math.cos(phase) * orbit * 0.7;
+        const ey = cy - figureScale * 0.3 - riseT * figureScale * 1.1;
+        const ez = Math.sin(phase) * orbit * 0.5;
+        const idx3 = i * 3;
+        positions[idx3] = ex;
+        positions[idx3 + 1] = ey;
+        positions[idx3 + 2] = ez;
+        const fade = Math.sin(riseT * Math.PI) * formation;
+        const c = lerpWarm(0.35 + riseT * 0.65);
+        colors[idx3] = c.r * fade;
+        colors[idx3 + 1] = c.g * fade;
+        colors[idx3 + 2] = c.b * fade;
+        sizes[i] = p.size;
+      }
+      emberGroup.geometry.attributes.position.needsUpdate = true;
+      emberGroup.geometry.attributes.color.needsUpdate = true;
+      emberGroup.geometry.attributes.aSize.needsUpdate = true;
+    }
+
+    function updateBursts(now) {
+      const { positions, colors, sizes, count } = burstGroup;
+      let slot = 0;
+      let maxFlash = 0;
+
+      for (let b = 0; b < bursts.length && b < BURST_POOL_SIZE; b++) {
+        const burst = bursts[b];
+        const elapsed = now - burst.startTime;
+        const t = elapsed / BURST_DURATION_MS;
+        const ring = burstGroup.rings[b];
+
+        if (t >= 1) {
+          ring.outer.visible = ring.inner.visible = false;
+        } else {
+          const flash = Math.max(0, 1 - elapsed / 180);
+          maxFlash = Math.max(maxFlash, flash * 0.35);
+
+          const ringR = 40 + elapsed * 0.55;
+          const ringAlpha = Math.max(0, (1 - t * 1.1) * 0.85);
+          ring.outer.visible = true;
+          ring.outer.position.set(burst.x, burst.y, -10);
+          ring.outer.scale.setScalar(ringR);
+          ring.outer.material.opacity = ringAlpha;
+
+          const ring2Alpha = Math.max(0, (1 - t * 1.3) * 0.5);
+          ring.inner.visible = true;
+          ring.inner.position.set(burst.x, burst.y, -10);
+          ring.inner.scale.setScalar(ringR * 0.65);
+          ring.inner.material.opacity = ring2Alpha;
+        }
+
+        for (const p of burst.particles) {
+          if (slot >= count) break;
+          const idx3 = slot * 3;
+          const lifeT = elapsed / (BURST_DURATION_MS * p.life);
+          if (t >= 1 || lifeT >= 1) {
+            colors[idx3] = colors[idx3 + 1] = colors[idx3 + 2] = 0;
+            sizes[slot] = 0;
+          } else {
+            const dist = p.speed * (elapsed / 1000);
+            positions[idx3] = burst.x + Math.cos(p.angle) * dist;
+            positions[idx3 + 1] = burst.y + Math.sin(p.angle) * dist;
+            positions[idx3 + 2] = 0;
+            const pAlpha = Math.max(0, 1 - lifeT);
+            colors[idx3] = pAlpha;
+            colors[idx3 + 1] = 0.9 * pAlpha;
+            colors[idx3 + 2] = 0.78 * pAlpha;
+            sizes[slot] = p.size * 2;
+          }
+          slot++;
+        }
+      }
+
+      // hide unused rings/particle slots
+      for (let b = bursts.length; b < BURST_POOL_SIZE; b++) {
+        burstGroup.rings[b].outer.visible = false;
+        burstGroup.rings[b].inner.visible = false;
+      }
+      for (; slot < count; slot++) {
+        const idx3 = slot * 3;
+        colors[idx3] = colors[idx3 + 1] = colors[idx3 + 2] = 0;
+        sizes[slot] = 0;
+      }
+
+      burstGroup.geometry.attributes.position.needsUpdate = true;
+      burstGroup.geometry.attributes.color.needsUpdate = true;
+      burstGroup.geometry.attributes.aSize.needsUpdate = true;
+
+      flashMesh.material.opacity = maxFlash;
+    }
+
+    // ---- animejs-driven power-up feel --------------------------------------
+    const auraFormation = { v: 0 };
+    function setAuraFormationTarget(active) {
+      animate(auraFormation, {
+        v: active ? 1 : 0,
+        duration: active ? 550 : 380,
+        ease: active ? 'outExpo' : 'inQuad',
+      });
+    }
+
+    function shakeCamera() {
+      if (!camera) return;
+      const kick = 10 + Math.random() * 6;
+      animate(camera.position, {
+        x: [(Math.random() - 0.5) * kick, 0],
+        y: [(Math.random() - 0.5) * kick, 0],
+        duration: 260,
+        ease: 'outElastic',
+      });
+    }
+
+    // ---- Main loop -------------------------------------------------------
+    function publishTestHook() {
+      window.__spotlightTestHook = {
+        currentX,
+        currentY,
+        pointerX,
+        pointerY,
+        canvasVisible: canvas.style.display !== 'none',
+        gamepadConnected,
+        radiusScale,
+        activeBurstCount: bursts.length,
+        auraActive,
+        expandActive,
+      };
     }
 
     function draw(now) {
       requestAnimationFrame(draw);
-      if (canvas.style.display === 'none') return;
 
-      const dt = lastFrameTime === null ? 0 : Math.min((now - lastFrameTime) / 1000, 0.05);
-      lastFrameTime = now;
+      const dt = Math.min(Math.max((now - lastDrawTime) / 1000, 1 / 240), 0.05);
+      lastDrawTime = now;
+
+      readGamepad(dt, now);
+
+      if (isTestMode) publishTestHook();
+      if (!gamepadConnected) return;
 
       const w = window.innerWidth;
       const h = window.innerHeight;
-      let target = computeTarget(w, h, dt);
+      const targetX = pointerX * w;
+      const targetY = pointerY * h;
 
-      if (disconnectedAt !== null && state.calibration.isCalibrated) {
-        target = { x: currentX ?? w / 2, y: currentY ?? h / 2, mode: 'live' };
-        renderViews();
-      }
+      if (currentX === null) currentX = targetX;
+      if (currentY === null) currentY = targetY;
 
-      const isPreview = target.mode === 'marks';
-      const isLive = target.mode === 'live' || target.mode === 'verify';
+      currentX = clamp(smoothFollow(currentX, targetX, FOLLOW_RATE, dt), 0, w);
+      currentY = clamp(smoothFollow(currentY, targetY, FOLLOW_RATE, dt), 0, h);
 
-      if (isLive || isPreview) {
-        if (currentX === null) currentX = target.x;
-        if (currentY === null) currentY = target.y;
-        const smooth = isPreview ? smoothingFactor * 0.5 : smoothingFactor;
-        currentX += (target.x - currentX) * smooth;
-        currentY += (target.y - currentY) * smooth;
-      }
+      const expandTarget = expandActive ? EXPAND_TARGET_SCALE : 1;
+      radiusScale = smoothFollow(radiusScale, expandTarget, EXPAND_SPRING_RATE, dt);
 
-      let intensity = 1;
-      if (disconnectedAt !== null) {
-        const sinceDrop = now - disconnectedAt;
-        if (sinceDrop > DISCONNECT_HOLD_MS) {
-          intensity = clamp(1 - (sinceDrop - DISCONNECT_HOLD_MS) / FADE_DURATION_MS, 0, 1);
-        }
-      }
+      cullBursts(now);
+      auraPhase += 0.016;
 
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, w, h);
+      const formation = auraFormation.v;
+      auraIntensityUniform.value = formation;
 
-      if (isPreview) {
-        drawTargetLine(w, h, target.targetPct ?? 0.5);
-        drawSpot(currentX, currentY, w, h, 0.4, 0.65);
-      } else if (isLive && intensity > 0) {
-        drawSpot(currentX, currentY, w, h, intensity, 1);
-      }
+      updateSpotlight(currentX, currentY, w, h, radiusScale);
+      updateFigure(currentX, currentY, w, h, formation, radiusScale);
+      updateEmbers(currentX, currentY, w, h, formation, radiusScale);
+      updateBursts(now);
+
+      renderer.render(scene, camera);
+
+      if (isTestMode) publishTestHook();
     }
-    requestAnimationFrame(draw);
+
+    async function start() {
+      await initRenderer();
+      renderViews();
+      requestAnimationFrame(draw);
+    }
+
+    start();
   </script>
 </body>
 </html>
