@@ -1,7 +1,7 @@
 {
   "name": "gamepad-spotlight",
-  "version": "2.0.0",
-  "description": "Static projection-mapping spotlight driven by a gamepad — left stick moves the spot, face buttons trigger effects",
+  "version": "3.0.0",
+  "description": "Static projection-mapping light show driven by a full gamepad — sticks, triggers, bumpers, D-pad all mapped — with audio-reactive mode via mic/interface",
   "scripts": {
     "start": "npx --yes serve public",
     "test": "playwright test"
