@@ -32,6 +32,17 @@
     #connect-view h1 { font-size: clamp(1.5rem, 4vw, 2.5rem); font-weight: 600; }
     #connect-view p  { font-size: clamp(0.95rem, 2vw, 1.2rem); color: #999; max-width: 42rem; line-height: 1.5; }
   </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three/three.core.js",
+      "three/webgpu": "./vendor/three/three.webgpu.js",
+      "three/tsl": "./vendor/three/three.tsl.js",
+      "animejs": "./vendor/animejs/index.js",
+      "animejs/adapters/three": "./vendor/animejs/adapters/three/index.js"
+    }
+  }
+  </script>
 </head>
 <body>
   <div id="connect-view">
@@ -45,14 +56,20 @@
 
   <canvas id="spotlight-canvas"></canvas>
 
-  <script>
+  <script type="module">
     'use strict';
+
+    import * as THREE from 'three/webgpu';
+    import {
+      Fn, uniform, attribute, time, positionLocal, vec3, mx_fractal_noise_vec3,
+    } from 'three/tsl';
+    import { animate } from 'animejs';
+    import 'animejs/adapters/three';
 
     const isTestMode = new URLSearchParams(window.location.search).get('test') === '1';
 
     const connectView = document.getElementById('connect-view');
     const canvas = document.getElementById('spotlight-canvas');
-    const ctx = canvas.getContext('2d');
 
     // ---- Tunables --------------------------------------------------------
     const MOVE_SPEED = 1.1;       // full-deflection travel, screen-fractions/sec
@@ -71,7 +88,32 @@
     const EXPAND_SPRING_RATE = 12;
     const BURST_DURATION_MS = 1200;
     const BURST_PARTICLE_COUNT = 40;
-    const AURA_EMBER_COUNT = 20;
+    const BURST_POOL_SIZE = 8; // max concurrent bursts with visible ring/flash geometry
+
+    // Warm power-aura palette (matches the original 2D gradient stops)
+    const WARM_STOPS = [
+      { t: 0.0, r: 255, g: 240, b: 210 }, // white-hot core
+      { t: 0.5, r: 255, g: 210, b: 160 }, // amber
+      { t: 1.0, r: 205, g: 185, b: 255 }, // lavender rim
+    ];
+
+    function lerpWarm(t) {
+      t = clamp(t, 0, 1);
+      for (let i = 0; i < WARM_STOPS.length - 1; i++) {
+        const a = WARM_STOPS[i];
+        const b = WARM_STOPS[i + 1];
+        if (t >= a.t && t <= b.t) {
+          const localT = (t - a.t) / (b.t - a.t || 1);
+          return {
+            r: (a.r + (b.r - a.r) * localT) / 255,
+            g: (a.g + (b.g - a.g) * localT) / 255,
+            b: (a.b + (b.b - a.b) * localT) / 255,
+          };
+        }
+      }
+      const last = WARM_STOPS[WARM_STOPS.length - 1];
+      return { r: last.r / 255, g: last.g / 255, b: last.b / 255 };
+    }
 
     // ---- State -----------------------------------------------------------
     let pointerX = 0.5;
@@ -99,13 +141,23 @@
     }
 
     function resizeCanvas() {
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(window.innerWidth * dpr);
-      canvas.height = Math.round(window.innerHeight * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (!renderer || !camera) return;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(w, h, false);
+      camera.left = 0;
+      camera.right = w;
+      camera.top = 0;
+      camera.bottom = h;
+      camera.updateProjectionMatrix();
+      if (flashMesh) {
+        flashMesh.geometry.dispose();
+        flashMesh.geometry = new THREE.PlaneGeometry(w, h);
+        flashMesh.position.set(w / 2, h / 2, -50);
+      }
     }
     window.addEventListener('resize', resizeCanvas);
-    resizeCanvas();
 
     // ---- Gamepad input ---------------------------------------------------
     function activeGamepad() {
@@ -147,7 +199,10 @@
         spawnBurst(currentX ?? pointerX * w, currentY ?? pointerY * h, now);
       }
       expandActive = pressed(BTN_EXPAND);
-      if (edge(BTN_AURA)) auraActive = !auraActive;
+      if (edge(BTN_AURA)) {
+        auraActive = !auraActive;
+        setAuraFormationTarget(auraActive);
+      }
       if (edge(BTN_RECENTER)) {
         pointerX = 0.5;
         pointerY = 0.5;
@@ -170,7 +225,7 @@
       renderViews();
     });
 
-    // ---- Effects ---------------------------------------------------------
+    // ---- Effects (state bookkeeping, unchanged from the 2D-canvas version) -
     function spawnBurst(x, y, now) {
       const particles = [];
       for (let i = 0; i < BURST_PARTICLE_COUNT; i++) {
@@ -184,6 +239,7 @@
         });
       }
       bursts.push({ x, y, startTime: now, particles });
+      shakeCamera();
     }
 
     function cullBursts(now) {
@@ -194,116 +250,412 @@
       return Math.min(w, h) * 0.22;
     }
 
-    function drawAura(x, y, w, h, now, intensity) {
-      auraPhase += 0.016;
-      const breath = 0.85 + Math.sin(auraPhase * 1.8) * 0.15;
-      const r = baseRadius(w, h) * radiusScale * (1.8 + breath * 0.5);
+    // ---- WebGPU / TSL particle scene --------------------------------------
+    let renderer = null;
+    let scene = null;
+    let camera = null;
+    let spotlightGroup = null;
+    let figureGroup = null;
+    let emberGroup = null;
+    let burstGroup = null;
+    let flashMesh = null;
+    const auraIntensityUniform = uniform(0);
 
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-
-      const halo = ctx.createRadialGradient(x, y, r * 0.15, x, y, r);
-      halo.addColorStop(0, `rgba(255, 240, 210, ${0.12 * intensity})`);
-      halo.addColorStop(0.45, `rgba(255, 220, 180, ${0.08 * intensity})`);
-      halo.addColorStop(0.75, `rgba(200, 180, 255, ${0.04 * intensity})`);
-      halo.addColorStop(1, 'rgba(255, 255, 255, 0)');
-      ctx.fillStyle = halo;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
-
-      const ring = ctx.createRadialGradient(x, y, r * 0.72, x, y, r * 0.95);
-      ring.addColorStop(0, 'rgba(255, 255, 255, 0)');
-      ring.addColorStop(0.5, `rgba(255, 255, 255, ${0.18 * intensity * breath})`);
-      ring.addColorStop(1, 'rgba(255, 255, 255, 0)');
-      ctx.fillStyle = ring;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
-
-      for (let i = 0; i < AURA_EMBER_COUNT; i++) {
-        const phase = auraPhase * (0.6 + (i % 5) * 0.08) + i * 1.37;
-        const orbit = r * (0.55 + (i % 7) * 0.06);
-        const ex = x + Math.cos(phase) * orbit;
-        const ey = y + Math.sin(phase * 1.13) * orbit * 0.85;
-        const emberAlpha = (0.25 + Math.sin(phase * 2.1) * 0.15) * intensity;
-        const emberR = 1.5 + (i % 3) * 0.8;
-        const ember = ctx.createRadialGradient(ex, ey, 0, ex, ey, emberR * 3);
-        ember.addColorStop(0, `rgba(255, 230, 200, ${emberAlpha})`);
-        ember.addColorStop(1, 'rgba(255, 255, 255, 0)');
-        ctx.fillStyle = ember;
-        ctx.beginPath();
-        ctx.arc(ex, ey, emberR * 3, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      ctx.restore();
+    function makeGlowTexture() {
+      const size = 64;
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const cctx = c.getContext('2d');
+      const g = cctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+      g.addColorStop(0, 'rgba(255,255,255,1)');
+      g.addColorStop(0.4, 'rgba(255,255,255,0.65)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      cctx.fillStyle = g;
+      cctx.fillRect(0, 0, size, size);
+      const tex = new THREE.CanvasTexture(c);
+      tex.needsUpdate = true;
+      return tex;
     }
 
-    function drawBursts(w, h, now, intensity) {
-      if (!bursts.length) return;
+    function shimmerPositionNode() {
+      return Fn(() => {
+        const n = mx_fractal_noise_vec3(vec3(positionLocal.mul(0.01).add(vec3(0, 0, time.mul(0.4)))));
+        return positionLocal.add(n.mul(auraIntensityUniform.mul(9.0)));
+      })();
+    }
 
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
+    function makePointsMaterial(map, { shimmer = false } = {}) {
+      const material = new THREE.PointsNodeMaterial();
+      material.map = map;
+      material.vertexColors = true;
+      material.transparent = true;
+      material.depthWrite = false;
+      material.depthTest = false;
+      material.blending = THREE.AdditiveBlending;
+      material.sizeAttenuation = false;
+      material.sizeNode = attribute('aSize');
+      if (shimmer) material.positionNode = shimmerPositionNode();
+      return material;
+    }
 
-      for (const burst of bursts) {
+    function makePointsGroup(count, map, opts) {
+      const geometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(count * 3);
+      const colors = new Float32Array(count * 3);
+      const sizes = new Float32Array(count);
+      const seeds = new Float32Array(count);
+      for (let i = 0; i < count; i++) seeds[i] = Math.random();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+      geometry.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+      const material = makePointsMaterial(map, opts);
+      const points = new THREE.Points(geometry, material);
+      points.frustumCulled = false;
+      return { points, geometry, positions, colors, sizes, seeds, count };
+    }
+
+    function randomOnSphere() {
+      let x, y, z, len;
+      do {
+        x = Math.random() * 2 - 1;
+        y = Math.random() * 2 - 1;
+        z = Math.random() * 2 - 1;
+        len = x * x + y * y + z * z;
+      } while (len > 1 || len === 0);
+      len = Math.sqrt(len);
+      return { x: x / len, y: y / len, z: z / len };
+    }
+
+    // Abstract, minimal humanoid silhouette in a local unit space:
+    // y negative = up (head), y positive = down (feet). Scaled to pixels at render time.
+    function sampleBodyPart(name) {
+      switch (name) {
+        case 'head': {
+          const v = randomOnSphere();
+          return { x: v.x * 0.11, y: -0.78 + v.y * 0.11, z: v.z * 0.11, colorT: 0.05 + Math.random() * 0.15 };
+        }
+        case 'torso': {
+          const t = Math.random();
+          const y = -0.62 + t * 0.42;
+          const width = 0.10 + t * 0.06;
+          const a = Math.random() * Math.PI * 2;
+          return { x: Math.cos(a) * width, y, z: Math.sin(a) * width * 0.55, colorT: 0.1 + Math.random() * 0.25 };
+        }
+        case 'armL':
+        case 'armR': {
+          const side = name === 'armL' ? -1 : 1;
+          const t = Math.random();
+          const shoulderY = -0.55, fistY = -0.16;
+          const shoulderX = side * 0.16, fistX = side * 0.30;
+          const y = shoulderY + (fistY - shoulderY) * t;
+          const bend = Math.sin(t * Math.PI) * 0.05;
+          const x = shoulderX + (fistX - shoulderX) * t + side * bend;
+          const r = 0.035 * (1 - t * 0.3);
+          const a = Math.random() * Math.PI * 2;
+          return { x: x + Math.cos(a) * r, y, z: Math.sin(a) * r, colorT: 0.35 + Math.random() * 0.3 };
+        }
+        case 'legL':
+        case 'legR': {
+          const side = name === 'legL' ? -1 : 1;
+          const t = Math.random();
+          const hipY = -0.20, footY = 0.35;
+          const hipX = side * 0.06, footX = side * 0.14;
+          const y = hipY + (footY - hipY) * t;
+          const x = hipX + (footX - hipX) * t;
+          const r = 0.045 * (1 - t * 0.2);
+          const a = Math.random() * Math.PI * 2;
+          return { x: x + Math.cos(a) * r, y, z: Math.sin(a) * r, colorT: 0.4 + Math.random() * 0.35 };
+        }
+        default:
+          return { x: 0, y: 0, z: 0, colorT: 0 };
+      }
+    }
+
+    function buildFigureModel(count) {
+      const parts = [
+        { name: 'head', share: 0.10 },
+        { name: 'torso', share: 0.30 },
+        { name: 'armL', share: 0.12 },
+        { name: 'armR', share: 0.12 },
+        { name: 'legL', share: 0.18 },
+        { name: 'legR', share: 0.18 },
+      ];
+      const model = [];
+      for (const part of parts) {
+        const n = Math.round(count * part.share);
+        for (let i = 0; i < n; i++) {
+          const base = sampleBodyPart(part.name);
+          const scatter = randomOnSphere();
+          const scatterMag = 0.9 + Math.random() * 1.6;
+          model.push({
+            base,
+            scatter: { x: scatter.x * scatterMag, y: scatter.y * scatterMag, z: scatter.z * scatterMag },
+            size: 2 + Math.random() * 2.5,
+            colorT: base.colorT,
+          });
+        }
+      }
+      return model;
+    }
+
+    function buildEmberModel(count) {
+      const model = [];
+      for (let i = 0; i < count; i++) {
+        model.push({
+          seed: Math.random(),
+          speed: 0.5 + (i % 5) * 0.11,
+          orbit: 0.28 + (i % 7) * 0.05,
+          riseSpeed: 0.15 + (i % 4) * 0.05,
+          size: 1.5 + Math.random() * 2.5,
+        });
+      }
+      return model;
+    }
+
+    async function initRenderer() {
+      renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
+      await renderer.init();
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x000000);
+
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      camera = new THREE.OrthographicCamera(0, w, 0, h, -1000, 1000);
+      camera.position.z = 100;
+
+      const glowTex = makeGlowTexture();
+
+      // Spotlight core
+      const SPOTLIGHT_COUNT = 140;
+      spotlightGroup = makePointsGroup(SPOTLIGHT_COUNT, glowTex);
+      spotlightGroup.model = Array.from({ length: SPOTLIGHT_COUNT }, () => ({
+        r: Math.pow(Math.random(), 1.8),
+        a: Math.random() * Math.PI * 2,
+      }));
+      scene.add(spotlightGroup.points);
+
+      // Aura figure (abstract humanoid), gets the shimmering GPU displacement
+      const FIGURE_COUNT = 550;
+      figureGroup = makePointsGroup(FIGURE_COUNT, glowTex, { shimmer: true });
+      figureGroup.model = buildFigureModel(FIGURE_COUNT);
+      figureGroup.points.visible = false;
+      scene.add(figureGroup.points);
+
+      // Aura embers (rising flame licks around the figure)
+      const EMBER_COUNT = 90;
+      emberGroup = makePointsGroup(EMBER_COUNT, glowTex, { shimmer: true });
+      emberGroup.model = buildEmberModel(EMBER_COUNT);
+      emberGroup.points.visible = false;
+      scene.add(emberGroup.points);
+
+      // Burst sparks (shared pool across all concurrently active bursts)
+      const BURST_TOTAL = BURST_POOL_SIZE * BURST_PARTICLE_COUNT;
+      burstGroup = makePointsGroup(BURST_TOTAL, glowTex);
+      scene.add(burstGroup.points);
+
+      // Burst rings — pooled meshes, one pair per concurrent burst slot
+      burstGroup.rings = [];
+      for (let i = 0; i < BURST_POOL_SIZE; i++) {
+        const outerMat = new THREE.MeshBasicNodeMaterial({
+          color: 0xffffff, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, side: THREE.DoubleSide,
+        });
+        const innerMat = new THREE.MeshBasicNodeMaterial({
+          color: 0xffd8b0, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, side: THREE.DoubleSide,
+        });
+        const outer = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 48), outerMat);
+        const inner = new THREE.Mesh(new THREE.RingGeometry(0.8, 1, 48), innerMat);
+        outer.visible = inner.visible = false;
+        scene.add(outer, inner);
+        burstGroup.rings.push({ outer, inner });
+      }
+
+      // Fullscreen additive flash on burst impact
+      const flashMat = new THREE.MeshBasicNodeMaterial({
+        color: 0xffffff, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
+      });
+      flashMesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), flashMat);
+      flashMesh.position.set(w / 2, h / 2, -50);
+      scene.add(flashMesh);
+
+      resizeCanvas();
+    }
+
+    function updateSpotlight(cx, cy, w, h, scale) {
+      const radius = baseRadius(w, h) * scale;
+      const { positions, colors, sizes, model, count } = spotlightGroup;
+      for (let i = 0; i < count; i++) {
+        const { r, a } = model[i];
+        const dist = r * radius;
+        const idx3 = i * 3;
+        positions[idx3] = cx + Math.cos(a) * dist;
+        positions[idx3 + 1] = cy + Math.sin(a) * dist;
+        positions[idx3 + 2] = 0;
+        const falloff = 1 - r;
+        colors[idx3] = falloff;
+        colors[idx3 + 1] = falloff;
+        colors[idx3 + 2] = falloff;
+        sizes[i] = 1.5 + falloff * 5;
+      }
+      spotlightGroup.geometry.attributes.position.needsUpdate = true;
+      spotlightGroup.geometry.attributes.color.needsUpdate = true;
+      spotlightGroup.geometry.attributes.aSize.needsUpdate = true;
+    }
+
+    function updateFigure(cx, cy, w, h, formation, scale) {
+      const visible = formation > 0.001;
+      figureGroup.points.visible = visible;
+      if (!visible) return;
+
+      const figureScale = Math.min(w, h) * 0.42 * scale;
+      const scatterT = 1 - formation;
+      const { positions, colors, sizes, model, count } = figureGroup;
+      for (let i = 0; i < count; i++) {
+        const p = model[i];
+        const lx = p.base.x + p.scatter.x * scatterT;
+        const ly = p.base.y + p.scatter.y * scatterT;
+        const lz = p.base.z + p.scatter.z * scatterT;
+        const idx3 = i * 3;
+        positions[idx3] = cx + lx * figureScale;
+        positions[idx3 + 1] = cy + ly * figureScale;
+        positions[idx3 + 2] = lz * figureScale;
+        const c = lerpWarm(p.colorT);
+        const alpha = formation;
+        colors[idx3] = c.r * alpha;
+        colors[idx3 + 1] = c.g * alpha;
+        colors[idx3 + 2] = c.b * alpha;
+        sizes[i] = p.size;
+      }
+      figureGroup.geometry.attributes.position.needsUpdate = true;
+      figureGroup.geometry.attributes.color.needsUpdate = true;
+      figureGroup.geometry.attributes.aSize.needsUpdate = true;
+    }
+
+    function updateEmbers(cx, cy, w, h, formation, scale) {
+      const visible = formation > 0.001;
+      emberGroup.points.visible = visible;
+      if (!visible) return;
+
+      const figureScale = Math.min(w, h) * 0.42 * scale;
+      const { positions, colors, sizes, model, count } = emberGroup;
+      for (let i = 0; i < count; i++) {
+        const p = model[i];
+        const phase = auraPhase * p.speed + p.seed * Math.PI * 2;
+        const orbit = figureScale * p.orbit;
+        const riseT = (auraPhase * p.riseSpeed + p.seed) % 1;
+        const ex = cx + Math.cos(phase) * orbit * 0.7;
+        const ey = cy - figureScale * 0.3 - riseT * figureScale * 1.1;
+        const ez = Math.sin(phase) * orbit * 0.5;
+        const idx3 = i * 3;
+        positions[idx3] = ex;
+        positions[idx3 + 1] = ey;
+        positions[idx3 + 2] = ez;
+        const fade = Math.sin(riseT * Math.PI) * formation;
+        const c = lerpWarm(0.35 + riseT * 0.65);
+        colors[idx3] = c.r * fade;
+        colors[idx3 + 1] = c.g * fade;
+        colors[idx3 + 2] = c.b * fade;
+        sizes[i] = p.size;
+      }
+      emberGroup.geometry.attributes.position.needsUpdate = true;
+      emberGroup.geometry.attributes.color.needsUpdate = true;
+      emberGroup.geometry.attributes.aSize.needsUpdate = true;
+    }
+
+    function updateBursts(now) {
+      const { positions, colors, sizes, count } = burstGroup;
+      let slot = 0;
+      let maxFlash = 0;
+
+      for (let b = 0; b < bursts.length && b < BURST_POOL_SIZE; b++) {
+        const burst = bursts[b];
         const elapsed = now - burst.startTime;
         const t = elapsed / BURST_DURATION_MS;
-        if (t >= 1) continue;
+        const ring = burstGroup.rings[b];
 
-        const flash = Math.max(0, 1 - elapsed / 180);
-        if (flash > 0) {
-          ctx.fillStyle = `rgba(255, 255, 255, ${flash * 0.35 * intensity})`;
-          ctx.fillRect(0, 0, w, h);
+        if (t >= 1) {
+          ring.outer.visible = ring.inner.visible = false;
+        } else {
+          const flash = Math.max(0, 1 - elapsed / 180);
+          maxFlash = Math.max(maxFlash, flash * 0.35);
+
+          const ringR = 40 + elapsed * 0.55;
+          const ringAlpha = Math.max(0, (1 - t * 1.1) * 0.85);
+          ring.outer.visible = true;
+          ring.outer.position.set(burst.x, burst.y, -10);
+          ring.outer.scale.setScalar(ringR);
+          ring.outer.material.opacity = ringAlpha;
+
+          const ring2Alpha = Math.max(0, (1 - t * 1.3) * 0.5);
+          ring.inner.visible = true;
+          ring.inner.position.set(burst.x, burst.y, -10);
+          ring.inner.scale.setScalar(ringR * 0.65);
+          ring.inner.material.opacity = ring2Alpha;
         }
 
-        const ringR = 40 + elapsed * 0.55;
-        const ringAlpha = Math.max(0, (1 - t * 1.1) * 0.85 * intensity);
-        ctx.strokeStyle = `rgba(255, 255, 255, ${ringAlpha})`;
-        ctx.lineWidth = 3 + (1 - t) * 8;
-        ctx.beginPath();
-        ctx.arc(burst.x, burst.y, ringR, 0, Math.PI * 2);
-        ctx.stroke();
-
-        const ring2Alpha = Math.max(0, (1 - t * 1.3) * 0.5 * intensity);
-        ctx.strokeStyle = `rgba(255, 220, 180, ${ring2Alpha})`;
-        ctx.lineWidth = 1 + (1 - t) * 4;
-        ctx.beginPath();
-        ctx.arc(burst.x, burst.y, ringR * 0.65, 0, Math.PI * 2);
-        ctx.stroke();
-
         for (const p of burst.particles) {
+          if (slot >= count) break;
+          const idx3 = slot * 3;
           const lifeT = elapsed / (BURST_DURATION_MS * p.life);
-          if (lifeT >= 1) continue;
-          const dist = p.speed * (elapsed / 1000);
-          const px = burst.x + Math.cos(p.angle) * dist;
-          const py = burst.y + Math.sin(p.angle) * dist;
-          const pAlpha = Math.max(0, (1 - lifeT) * intensity);
-          const spark = ctx.createRadialGradient(px, py, 0, px, py, p.size * 2);
-          spark.addColorStop(0, `rgba(255, 255, 255, ${pAlpha})`);
-          spark.addColorStop(0.4, `rgba(255, 230, 200, ${pAlpha * 0.6})`);
-          spark.addColorStop(1, 'rgba(255, 255, 255, 0)');
-          ctx.fillStyle = spark;
-          ctx.beginPath();
-          ctx.arc(px, py, p.size * 2, 0, Math.PI * 2);
-          ctx.fill();
+          if (t >= 1 || lifeT >= 1) {
+            colors[idx3] = colors[idx3 + 1] = colors[idx3 + 2] = 0;
+            sizes[slot] = 0;
+          } else {
+            const dist = p.speed * (elapsed / 1000);
+            positions[idx3] = burst.x + Math.cos(p.angle) * dist;
+            positions[idx3 + 1] = burst.y + Math.sin(p.angle) * dist;
+            positions[idx3 + 2] = 0;
+            const pAlpha = Math.max(0, 1 - lifeT);
+            colors[idx3] = pAlpha;
+            colors[idx3 + 1] = 0.9 * pAlpha;
+            colors[idx3 + 2] = 0.78 * pAlpha;
+            sizes[slot] = p.size * 2;
+          }
+          slot++;
         }
       }
 
-      ctx.restore();
+      // hide unused rings/particle slots
+      for (let b = bursts.length; b < BURST_POOL_SIZE; b++) {
+        burstGroup.rings[b].outer.visible = false;
+        burstGroup.rings[b].inner.visible = false;
+      }
+      for (; slot < count; slot++) {
+        const idx3 = slot * 3;
+        colors[idx3] = colors[idx3 + 1] = colors[idx3 + 2] = 0;
+        sizes[slot] = 0;
+      }
+
+      burstGroup.geometry.attributes.position.needsUpdate = true;
+      burstGroup.geometry.attributes.color.needsUpdate = true;
+      burstGroup.geometry.attributes.aSize.needsUpdate = true;
+
+      flashMesh.material.opacity = maxFlash;
     }
 
-    function drawSpot(x, y, w, h, intensity, scale) {
-      const radius = baseRadius(w, h) * scale;
-      const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
-      g.addColorStop(0.0, `rgba(255, 255, 255, ${intensity})`);
-      g.addColorStop(0.5, `rgba(255, 255, 255, ${0.85 * intensity})`);
-      g.addColorStop(0.8, `rgba(255, 255, 255, ${0.25 * intensity})`);
-      g.addColorStop(1.0, 'rgba(255, 255, 255, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
+    // ---- animejs-driven power-up feel --------------------------------------
+    const auraFormation = { v: 0 };
+    function setAuraFormationTarget(active) {
+      animate(auraFormation, {
+        v: active ? 1 : 0,
+        duration: active ? 550 : 380,
+        ease: active ? 'outExpo' : 'inQuad',
+      });
+    }
+
+    function shakeCamera() {
+      if (!camera) return;
+      const kick = 10 + Math.random() * 6;
+      animate(camera.position, {
+        x: [(Math.random() - 0.5) * kick, 0],
+        y: [(Math.random() - 0.5) * kick, 0],
+        duration: 260,
+        ease: 'outElastic',
+      });
     }
 
     // ---- Main loop -------------------------------------------------------
@@ -348,19 +700,28 @@
       radiusScale = smoothFollow(radiusScale, expandTarget, EXPAND_SPRING_RATE, dt);
 
       cullBursts(now);
+      auraPhase += 0.016;
 
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, w, h);
+      const formation = auraFormation.v;
+      auraIntensityUniform.value = formation;
 
-      drawBursts(w, h, now, 1);
-      if (auraActive) drawAura(currentX, currentY, w, h, now, 1);
-      drawSpot(currentX, currentY, w, h, 1, radiusScale);
+      updateSpotlight(currentX, currentY, w, h, radiusScale);
+      updateFigure(currentX, currentY, w, h, formation, radiusScale);
+      updateEmbers(currentX, currentY, w, h, formation, radiusScale);
+      updateBursts(now);
+
+      renderer.render(scene, camera);
 
       if (isTestMode) publishTestHook();
     }
 
-    renderViews();
-    requestAnimationFrame(draw);
+    async function start() {
+      await initRenderer();
+      renderViews();
+      requestAnimationFrame(draw);
+    }
+
+    start();
   </script>
 </body>
 </html>
