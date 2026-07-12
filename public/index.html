@@ -110,12 +110,18 @@
 
     import * as THREE from 'three/webgpu';
     import {
-      Fn, uniform, attribute, time, positionLocal, vec3, mx_fractal_noise_vec3,
+      Fn, uniform, time, vec3, sin,
+      instancedBufferAttribute, uv, smoothstep, mix,
     } from 'three/tsl';
     import { animate } from 'animejs';
     import 'animejs/adapters/three';
 
-    const isTestMode = new URLSearchParams(window.location.search).get('test') === '1';
+    const pageParams = new URLSearchParams(window.location.search);
+    const isTestMode = pageParams.get('test') === '1';
+    const forceWebGL = pageParams.get('webgl') === '1';
+    // Test-only: render at reduced resolution so software-GL CI keeps a
+    // realtime frame rate (effect clocks accumulate real dt per frame).
+    const lowRes = pageParams.get('lowres') === '1';
 
     const connectView = document.getElementById('connect-view');
     const canvas = document.getElementById('spotlight-canvas');
@@ -255,6 +261,7 @@
 
     let gamepadConnected = false;
     let prevButtons = [];
+    let mappingWarned = false;
 
     let expandActive = false;
     let auraActive = false;
@@ -311,7 +318,7 @@
       if (!renderer || !camera) return;
       const w = window.innerWidth;
       const h = window.innerHeight;
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setPixelRatio(lowRes ? 0.35 : Math.min(window.devicePixelRatio || 1, 2));
       renderer.setSize(w, h, false);
       camera.left = 0;
       camera.right = w;
@@ -360,12 +367,25 @@
       pointerX = clamp(pointerX + stick.x * MOVE_SPEED * dt, 0, 1);
       pointerY = clamp(pointerY + stick.y * ySign * MOVE_SPEED * dt, 0, 1);
 
-      // Right stick — aim the stand, and lean embers/wisps into the wind
-      const rx = gp.axes[2] || 0;
-      const ry = gp.axes[3] || 0;
-      const rstick = applyStickCurve(rx, ry, 0.18);
-      if (rstick.mag > 0) {
-        standAngle = angleLerp(standAngle, Math.atan2(ry, rx), 10, dt);
+      // Non-standard pads report different indices/axes; warn once so a
+      // misbehaving layout is diagnosable instead of mysterious.
+      const isStandardPad = gp.mapping === 'standard';
+      if (!isStandardPad && !mappingWarned) {
+        mappingWarned = true;
+        toast('NON-STANDARD PAD — MAPPING MAY DIFFER');
+      }
+
+      // Right stick — aim the stand, and lean embers/wisps into the wind.
+      // Only trust axes 2/3 on standard mapping: elsewhere they are often
+      // analog triggers resting at -1, which would slam the wind/stand aim.
+      let rstick = { x: 0, y: 0, mag: 0 };
+      if (isStandardPad && gp.axes.length >= 4) {
+        const rx = gp.axes[2] || 0;
+        const ry = gp.axes[3] || 0;
+        rstick = applyStickCurve(rx, ry, 0.18);
+        if (rstick.mag > 0) {
+          standAngle = angleLerp(standAngle, Math.atan2(ry, rx), 10, dt);
+        }
       }
       const w = window.innerWidth;
       const h = window.innerHeight;
@@ -409,8 +429,8 @@
       }
       if (edge(BTN_BLACKOUT)) {
         blackoutActive = !blackoutActive;
-        animate(blackMesh.material, {
-          opacity: blackoutActive ? 1 : 0,
+        animate(blackoutFade, {
+          v: blackoutActive ? 1 : 0,
           duration: 240,
           ease: 'outQuad',
         });
@@ -607,68 +627,102 @@
     let barrageGroup = null;
     let flashMesh = null;
     let blackMesh = null;
+    let discMesh = null;
+    let haloMesh = null;
     const auraIntensityUniform = uniform(0);
     const ghostIntensityUniform = uniform(0);
     const standIntensityUniform = uniform(0);
+    const discCoreUniform = uniform(new THREE.Color(1, 1, 1));
+    const discMidUniform = uniform(new THREE.Color(1, 1, 1));
+    const discRimUniform = uniform(new THREE.Color(1, 1, 1));
+    const discBrightUniform = uniform(1);
 
-    function makeGlowTexture() {
-      const size = 64;
-      const c = document.createElement('canvas');
-      c.width = c.height = size;
-      const cctx = c.getContext('2d');
-      const g = cctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-      g.addColorStop(0, 'rgba(255,255,255,1)');
-      g.addColorStop(0.4, 'rgba(255,255,255,0.65)');
-      g.addColorStop(1, 'rgba(255,255,255,0)');
-      cctx.fillStyle = g;
-      cctx.fillRect(0, 0, size, size);
-      const tex = new THREE.CanvasTexture(c);
-      tex.needsUpdate = true;
-      return tex;
-    }
-
-    function shimmerPositionNode(intensity, amp, speed) {
-      return Fn(() => {
-        const n = mx_fractal_noise_vec3(vec3(positionLocal.mul(0.01).add(vec3(0, 0, time.mul(speed)))));
-        return positionLocal.add(n.mul(intensity.mul(amp)));
-      })();
-    }
-
-    function makePointsMaterial(map, { shimmer = null } = {}) {
-      const material = new THREE.PointsNodeMaterial();
-      material.map = map;
-      material.vertexColors = true;
+    // Radial palette-gradient disc, evaluated in TSL. Scale = spot radius.
+    function makeGradientDisc(falloffPow, alpha) {
+      const material = new THREE.MeshBasicNodeMaterial();
       material.transparent = true;
       material.depthWrite = false;
       material.depthTest = false;
       material.blending = THREE.AdditiveBlending;
-      material.sizeAttenuation = false;
-      material.sizeNode = attribute('aSize');
-      if (shimmer) material.positionNode = shimmerPositionNode(shimmer.intensity, shimmer.amp, shimmer.speed);
-      return material;
+      // The 0-top ortho camera flips winding — FrontSide quads get culled
+      material.side = THREE.DoubleSide;
+      const d = uv().sub(0.5).length().mul(2.0).clamp(0.0, 1.0);
+      const col = mix(
+        mix(discCoreUniform, discMidUniform, smoothstep(0.0, 0.55, d)),
+        discRimUniform,
+        smoothstep(0.55, 1.0, d),
+      );
+      material.colorNode = col.mul(discBrightUniform);
+      material.opacityNode = smoothstep(1.0, 0.0, d).pow(falloffPow).mul(alpha);
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+      mesh.frustumCulled = false;
+      return mesh;
     }
 
-    function makePointsGroup(count, map, opts) {
-      const geometry = new THREE.BufferGeometry();
-      const positions = new Float32Array(count * 3);
-      const colors = new Float32Array(count * 3);
-      const sizes = new Float32Array(count);
+    // Soft round glow evaluated on the sprite quad in TSL — no texture involved.
+    function glowOpacityNode() {
+      const d = uv().sub(0.5).length().mul(2.0);
+      return smoothstep(1.0, 0.0, d).pow(1.8);
+    }
+
+    // Fat particles on WebGPU: point primitives are always 1px there, so each
+    // group is one instanced Sprite (a camera-facing quad per particle) whose
+    // per-instance position/color/size live in instanced attributes that the
+    // TSL position/color/size nodes read directly.
+    function makeParticleGroup(count, { shimmer = null } = {}) {
+      const posAttr = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
+      const colAttr = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
+      const sizeAttr = new THREE.InstancedBufferAttribute(new Float32Array(count), 1);
+      posAttr.setUsage(THREE.DynamicDrawUsage);
+      colAttr.setUsage(THREE.DynamicDrawUsage);
+      sizeAttr.setUsage(THREE.DynamicDrawUsage);
       const seeds = new Float32Array(count);
       for (let i = 0; i < count; i++) seeds[i] = Math.random();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-      geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-      geometry.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
-      const material = makePointsMaterial(map, opts);
-      const points = new THREE.Points(geometry, material);
+
+      const material = new THREE.PointsNodeMaterial();
+      material.transparent = true;
+      material.depthWrite = false;
+      material.depthTest = false;
+      material.blending = THREE.AdditiveBlending;
+
+      const aPos = instancedBufferAttribute(posAttr);
+      // Layered incommensurate sines: organic-enough displacement that
+      // compiles instantly everywhere (fractal noise stalls software GL).
+      material.positionNode = shimmer
+        ? Fn(() => {
+            const p = aPos.mul(0.045);
+            const t = time.mul(shimmer.speed * 6.0);
+            const n = vec3(
+              sin(p.y.add(t)).add(sin(p.x.mul(1.7).add(t.mul(1.3)))),
+              sin(p.x.add(t.mul(0.9))).add(sin(p.y.mul(2.1).add(t.mul(1.1)))),
+              0,
+            ).mul(0.5);
+            return aPos.add(n.mul(shimmer.intensity.mul(shimmer.amp)));
+          })()
+        : aPos;
+      material.colorNode = instancedBufferAttribute(colAttr);
+      material.sizeNode = instancedBufferAttribute(sizeAttr);
+      material.opacityNode = glowOpacityNode();
+
+      const points = new THREE.Sprite(material);
+      points.count = count;
       points.frustumCulled = false;
-      return { points, geometry, positions, colors, sizes, seeds, count };
+
+      return {
+        points,
+        posAttr, colAttr, sizeAttr,
+        positions: posAttr.array,
+        colors: colAttr.array,
+        sizes: sizeAttr.array,
+        seeds,
+        count,
+      };
     }
 
     function commitGroup(group) {
-      group.geometry.attributes.position.needsUpdate = true;
-      group.geometry.attributes.color.needsUpdate = true;
-      group.geometry.attributes.aSize.needsUpdate = true;
+      group.posAttr.needsUpdate = true;
+      group.colAttr.needsUpdate = true;
+      group.sizeAttr.needsUpdate = true;
     }
 
     function randomOnSphere() {
@@ -806,7 +860,7 @@
     }
 
     async function initRenderer() {
-      renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
+      renderer = new THREE.WebGPURenderer({ canvas, antialias: true, forceWebGL });
       await renderer.init();
 
       scene = new THREE.Scene();
@@ -817,34 +871,38 @@
       camera = new THREE.OrthographicCamera(0, w, 0, h, -1000, 1000);
       camera.position.z = 100;
 
-      const glowTex = makeGlowTexture();
+      // Spotlight body — a real gradient disc + wide halo so the spot always
+      // reads as a beam of light, with the particle grain layered on top.
+      discMesh = makeGradientDisc(1.1, 0.95);
+      haloMesh = makeGradientDisc(2.4, 0.28);
+      scene.add(haloMesh, discMesh);
 
       // Ghost afterimages — lagging spectral copies of the spotlight disc
-      echoGroupA = makePointsGroup(80, glowTex);
+      echoGroupA = makeParticleGroup(80);
       echoGroupA.model = buildDiscModel(80, 1.6);
       echoGroupA.points.visible = false;
       scene.add(echoGroupA.points);
-      echoGroupB = makePointsGroup(80, glowTex);
+      echoGroupB = makeParticleGroup(80);
       echoGroupB.model = buildDiscModel(80, 1.6);
       echoGroupB.points.visible = false;
       scene.add(echoGroupB.points);
 
-      // Spotlight core
+      // Spotlight grain
       const SPOTLIGHT_COUNT = 140;
-      spotlightGroup = makePointsGroup(SPOTLIGHT_COUNT, glowTex);
+      spotlightGroup = makeParticleGroup(SPOTLIGHT_COUNT);
       spotlightGroup.model = buildDiscModel(SPOTLIGHT_COUNT, 1.8);
       scene.add(spotlightGroup.points);
 
       // Charge inflow — particles spiral into the spot while RT is held
       const CHARGE_COUNT = 150;
-      chargeGroup = makePointsGroup(CHARGE_COUNT, glowTex);
+      chargeGroup = makeParticleGroup(CHARGE_COUNT);
       chargeGroup.model = buildChargeModel(CHARGE_COUNT);
       chargeGroup.points.visible = false;
       scene.add(chargeGroup.points);
 
       // Aura figure (abstract humanoid), gets the shimmering GPU displacement
       const FIGURE_COUNT = 550;
-      figureGroup = makePointsGroup(FIGURE_COUNT, glowTex, {
+      figureGroup = makeParticleGroup(FIGURE_COUNT, {
         shimmer: { intensity: auraIntensityUniform, amp: 9.0, speed: 0.4 },
       });
       figureGroup.model = buildFigureModel(FIGURE_COUNT);
@@ -853,7 +911,7 @@
 
       // Aura embers (rising flame licks around the figure)
       const EMBER_COUNT = 90;
-      emberGroup = makePointsGroup(EMBER_COUNT, glowTex, {
+      emberGroup = makeParticleGroup(EMBER_COUNT, {
         shimmer: { intensity: auraIntensityUniform, amp: 9.0, speed: 0.4 },
       });
       emberGroup.model = buildEmberModel(EMBER_COUNT);
@@ -862,7 +920,7 @@
 
       // Ghost wisps — cold ectoplasm drifting around the spot
       const GHOST_COUNT = 130;
-      ghostGroup = makePointsGroup(GHOST_COUNT, glowTex, {
+      ghostGroup = makeParticleGroup(GHOST_COUNT, {
         shimmer: { intensity: ghostIntensityUniform, amp: 13.0, speed: 0.22 },
       });
       ghostGroup.model = buildGhostModel(GHOST_COUNT);
@@ -871,7 +929,7 @@
 
       // The stand — a second violet figure hovering beside the spot
       const STAND_COUNT = 480;
-      standGroup = makePointsGroup(STAND_COUNT, glowTex, {
+      standGroup = makeParticleGroup(STAND_COUNT, {
         shimmer: { intensity: standIntensityUniform, amp: 6.0, speed: 0.7 },
       });
       standGroup.model = buildFigureModel(STAND_COUNT);
@@ -879,12 +937,12 @@
       scene.add(standGroup.points);
 
       // Barrage streaks (stand rapid-fire jabs), pooled
-      barrageGroup = makePointsGroup(BARRAGE_POOL_SIZE * BARRAGE_PARTICLE_COUNT, glowTex);
+      barrageGroup = makeParticleGroup(BARRAGE_POOL_SIZE * BARRAGE_PARTICLE_COUNT);
       scene.add(barrageGroup.points);
 
       // Burst sparks (shared pool across all concurrently active bursts)
       const BURST_TOTAL = BURST_POOL_SIZE * BURST_PARTICLE_COUNT;
-      burstGroup = makePointsGroup(BURST_TOTAL, glowTex);
+      burstGroup = makeParticleGroup(BURST_TOTAL);
       scene.add(burstGroup.points);
 
       // Burst rings — pooled meshes, one pair per concurrent burst slot
@@ -898,8 +956,8 @@
           color: 0xffd8b0, transparent: true, opacity: 0,
           blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, side: THREE.DoubleSide,
         });
-        const outer = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 48), outerMat);
-        const inner = new THREE.Mesh(new THREE.RingGeometry(0.8, 1, 48), innerMat);
+        const outer = new THREE.Mesh(new THREE.RingGeometry(0.94, 1, 64), outerMat);
+        const inner = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, 64), innerMat);
         outer.visible = inner.visible = false;
         scene.add(outer, inner);
         burstGroup.rings.push({ outer, inner });
@@ -909,6 +967,7 @@
       const flashMat = new THREE.MeshBasicNodeMaterial({
         color: 0xffffff, transparent: true, opacity: 0,
         blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
+        side: THREE.DoubleSide,
       });
       flashMesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), flashMat);
       flashMesh.position.set(w / 2, h / 2, -50);
@@ -918,6 +977,7 @@
       const blackMat = new THREE.MeshBasicNodeMaterial({
         color: 0x000000, transparent: true, opacity: 0,
         depthWrite: false, depthTest: false,
+        side: THREE.DoubleSide,
       });
       blackMesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), blackMat);
       blackMesh.position.set(w / 2, h / 2, 50);
@@ -1123,10 +1183,10 @@
           ring.outer.visible = ring.inner.visible = false;
         } else {
           const flash = Math.max(0, 1 - elapsed / 180);
-          maxFlash = Math.max(maxFlash, flash * 0.35 * Math.min(power, 2));
+          maxFlash = Math.max(maxFlash, flash * 0.18 * Math.min(power, 1.6));
 
-          const ringR = (40 + elapsed * 0.55) * (0.65 + 0.55 * power);
-          const ringAlpha = Math.max(0, (1 - t * 1.1) * 0.85);
+          const ringR = (40 + elapsed * 0.55) * (0.65 + 0.55 * Math.min(power, 2.2));
+          const ringAlpha = Math.max(0, (1 - t * 1.1) * 0.7);
           ring.outer.visible = true;
           ring.outer.position.set(burst.x, burst.y, -10);
           ring.outer.scale.setScalar(ringR);
@@ -1220,6 +1280,7 @@
     const auraFormation = { v: 0 };
     const ghostFormation = { v: 0 };
     const standFormation = { v: 0 };
+    const blackoutFade = { v: 0 };
     function setFormationTarget(formation, active) {
       animate(formation, {
         v: active ? 1 : 0,
@@ -1266,6 +1327,40 @@
       hudStatusEl.textContent = parts.join('   ');
     }
 
+    // ---- Pixel probe (test mode) -------------------------------------------
+    // Samples the canvas right after render, in the same rAF turn, so the
+    // WebGL back buffer is still intact. Returns max r+g+b in a patch around
+    // the spotlight — proves pixels actually hit the screen.
+    let probeRequests = [];
+    let probeCanvas = null;
+    function runProbe() {
+      const S = 32;
+      if (!probeCanvas) {
+        probeCanvas = document.createElement('canvas');
+        probeCanvas.width = probeCanvas.height = S;
+      }
+      const ctx2 = probeCanvas.getContext('2d', { willReadFrequently: true });
+      const dpr = canvas.width / window.innerWidth;
+      const patch = 120 * dpr;
+      const sx = clamp((currentX ?? 0) * dpr - patch / 2, 0, Math.max(0, canvas.width - patch));
+      const sy = clamp((currentY ?? 0) * dpr - patch / 2, 0, Math.max(0, canvas.height - patch));
+      ctx2.clearRect(0, 0, S, S);
+      ctx2.drawImage(canvas, sx, sy, patch, patch, 0, 0, S, S);
+      const data = ctx2.getImageData(0, 0, S, S).data;
+      let max = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const v = data[i] + data[i + 1] + data[i + 2];
+        if (v > max) max = v;
+      }
+      return max;
+    }
+    if (isTestMode) {
+      // particlesOnly hides the disc/halo meshes for that one frame, so the
+      // probe attributes light to the instanced sprite pipeline specifically.
+      window.__probeFrame = (particlesOnly = false) =>
+        new Promise((resolve) => probeRequests.push({ resolve, particlesOnly }));
+    }
+
     // ---- Main loop -------------------------------------------------------
     function publishTestHook() {
       window.__spotlightTestHook = {
@@ -1288,6 +1383,7 @@
         charging,
         chargeLevel,
         blackoutActive,
+        blackoutFade: blackoutFade.v,
         strobeActive,
         hudVisible,
         audioEnabled,
@@ -1350,6 +1446,17 @@
       const brightMul = 1 + chargeLevel * 0.9 + audio.beatPulse * 0.25;
       const figureScale = baseRadius(w, h) * 1.9 * radiusScale * (1 + audio.bass * 0.12);
 
+      // Spotlight disc + halo follow the spot; gradient tracks the palette
+      const c0 = lerpPalette(0), c1 = lerpPalette(0.5), c2 = lerpPalette(1);
+      discCoreUniform.value.setRGB(c0.r, c0.g, c0.b);
+      discMidUniform.value.setRGB(c1.r, c1.g, c1.b);
+      discRimUniform.value.setRGB(c2.r, c2.g, c2.b);
+      discBrightUniform.value = brightMul;
+      discMesh.position.set(currentX, currentY, -20);
+      discMesh.scale.setScalar(spotRadius);
+      haloMesh.position.set(currentX, currentY, -20);
+      haloMesh.scale.setScalar(spotRadius * 2.2);
+
       updateEcho(echoGroupB, echoBX, echoBY, spotRadius * 1.1, ghostF, lerpStops(GHOST_STOPS, 0.9), 0.18);
       updateEcho(echoGroupA, echoAX, echoAY, spotRadius * 1.05, ghostF, lerpStops(GHOST_STOPS, 0.5), 0.3);
       updateSpotlight(currentX, currentY, spotRadius, sizeMul, brightMul);
@@ -1369,15 +1476,41 @@
           : (Math.sin(effT * Math.PI * 4) > 0.8 ? 0.16 : 0);
       }
       flashMesh.material.opacity = Math.max(burstFlash, strobe);
+      blackMesh.material.opacity = blackoutFade.v;
 
       renderHud();
+
+      const probing = probeRequests.length > 0;
+      const pending = probing ? probeRequests : null;
+      if (probing) probeRequests = [];
+      const particlesOnly = probing && pending.some((p) => p.particlesOnly);
+      if (particlesOnly) {
+        discMesh.visible = false;
+        haloMesh.visible = false;
+      }
+
       renderer.render(scene, camera);
+
+      if (probing) {
+        let result;
+        try {
+          result = runProbe();
+        } catch (err) {
+          result = -1;
+        }
+        for (const p of pending) p.resolve(result);
+        if (particlesOnly) {
+          discMesh.visible = true;
+          haloMesh.visible = true;
+        }
+      }
 
       if (isTestMode) publishTestHook();
     }
 
     async function start() {
       await initRenderer();
+      if (isTestMode) window.__debug = { scene, camera, get blackMesh() { return blackMesh; }, get renderer() { return renderer; } };
       renderViews();
       requestAnimationFrame(draw);
     }
