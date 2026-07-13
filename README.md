@@ -6,7 +6,7 @@ A fully static projection light show driven by a **gamepad** — one HTML file, 
 
 - **Projector**: a single self-contained page (`public/index.html`) — vanilla JS, Three.js WebGPU/TSL, animejs for feel
 - **Particles**: instanced sprites (one draw call per effect) with per-instance position/color/size read by TSL nodes — WebGPU can only draw 1px point primitives, so fat particles must be instanced quads. Falls back to WebGL2 automatically; `?webgl=1` forces it
-- **Input**: browser [Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), polled every animation frame. Non-standard pads get an on-screen warning — button indices assume the `standard` mapping
+- **Input**: browser [Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), polled every animation frame. Controls are bound through **profiles**, not raw indices: standard-mapping pads work as-is, 8BitDo pads in D-input mode (the mode that works on macOS) get a built-in profile, and any other layout auto-launches an on-screen **calibration wizard** ("press A… pull RT… D-pad up…") that handles scrambled buttons, axis triggers, and hat D-pads, then saves per-controller to localStorage. Press **C** on the keyboard anytime to recalibrate, **S** skips a step, **ESC** cancels
 - **Audio**: [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API) analyser over `getUserMedia` — any input device (built-in mic, USB audio interface) works
 
 ## Quick start
@@ -67,7 +67,7 @@ Tunables at the top of the script in `public/index.html`:
 | `CHARGE_RATE` | `0.9` | Charge per second at full RT pull |
 | `SLOWMO_DEPTH` | `0.78` | Full LT pull slows effect time to 1 − this |
 | `RADIUS_BASE_*` | — | Spot size default / step / clamps for the D-pad |
-| `BTN_*` | `0–15` | Button indices — remap everything here |
+| `standardProfile()` / `dinput8BitDoProfile()` | — | Control bindings — or just press **C** and calibrate on-screen |
 
 ## Tests
 
