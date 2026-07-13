@@ -57,19 +57,6 @@
       color: #fff; opacity: 0; pointer-events: none; z-index: 30;
       text-indent: 0.35em; /* balance the trailing letter-spacing */
     }
-
-    #calibrate-view {
-      position: fixed; inset: 0; z-index: 40;
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 1.2rem;
-      background: rgba(0, 0, 0, 0.88); color: #fff; text-align: center;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: 0.2em; text-transform: uppercase;
-      cursor: default;
-    }
-    #calibrate-view.hidden { display: none; }
-    #calibrate-view h1 { font-size: clamp(1.3rem, 4vw, 2.4rem); font-weight: 600; }
-    #calibrate-view p { color: #888; font-size: 12px; letter-spacing: 0.25em; }
   </style>
   <script type="importmap">
   {
@@ -106,10 +93,6 @@
       <div><b>Select</b> audio-reactive</div>
       <div><b>Start</b> this overlay</div>
     </div>
-    <p style="color:#555;font-size:0.85rem;">
-      Non-standard pad (D-input, 8BitDo, …)? A calibration wizard opens automatically —
-      or press <strong style="color:#999">C</strong> anytime to remap.
-    </p>
   </div>
 
   <canvas id="spotlight-canvas"></canvas>
@@ -121,13 +104,6 @@
     <div id="hud-status"></div>
   </div>
   <div id="toast"></div>
-
-  <div id="calibrate-view" class="hidden">
-    <p>Controller setup</p>
-    <h1 id="cal-label">—</h1>
-    <p id="cal-progress"></p>
-    <p>S skip step · ESC cancel · C restarts anytime</p>
-  </div>
 
   <script type="module">
     'use strict';
@@ -152,9 +128,6 @@
     const hudEl = document.getElementById('hud');
     const hudStatusEl = document.getElementById('hud-status');
     const toastEl = document.getElementById('toast');
-    const calView = document.getElementById('calibrate-view');
-    const calLabel = document.getElementById('cal-label');
-    const calProgress = document.getElementById('cal-progress');
 
     // ---- Tunables --------------------------------------------------------
     const MOVE_SPEED = 1.1;       // full-deflection travel, screen-fractions/sec
@@ -163,283 +136,23 @@
     const INVERT_Y = false;       // flip if your controller's Y axis feels backwards
     const FOLLOW_RATE = 28;       // spotlight easing toward the pointer
 
-    // ---- Controller profiles ----------------------------------------------
-    // Logical controls are bound to physical inputs through a profile, so
-    // non-standard pads (D-input, 8BitDo on macOS, …) can be remapped or
-    // calibrated on-screen instead of assuming Xbox indices.
-    //
-    // Binding shapes:
-    //   { t: 'btn', i }                       gamepad button index
-    //   { t: 'axisbtn', i, rest, target }     axis acting as button/trigger
-    //   { t: 'hat', i?, dir }                 D-input hat axis direction
-    const LOGICAL_BUTTONS = [
-      'burst', 'aura', 'expand', 'recenter', 'ghost', 'stand', 'slowmo', 'charge',
-      'audio', 'hud', 'blackout', 'strobe', 'up', 'down', 'left', 'right',
-    ];
-
-    function standardProfile() {
-      const idx = {
-        burst: 0, aura: 1, expand: 2, recenter: 3, ghost: 4, stand: 5,
-        slowmo: 6, charge: 7, audio: 8, hud: 9, blackout: 10, strobe: 11,
-        up: 12, down: 13, left: 14, right: 15,
-      };
-      const buttons = {};
-      for (const k in idx) buttons[k] = { t: 'btn', i: idx[k] };
-      return {
-        name: 'STANDARD',
-        buttons,
-        axes: { lx: { i: 0, sign: 1 }, ly: { i: 1, sign: 1 }, rx: { i: 2, sign: 1 }, ry: { i: 3, sign: 1 } },
-      };
-    }
-
-    // 8BitDo pads in D-input mode (the mode that works on macOS) — layout from
-    // the SDL controller database. The D-pad arrives as a hat axis whose index
-    // is detected at runtime. Press C to calibrate if anything is off.
-    function dinput8BitDoProfile() {
-      const b = (i) => ({ t: 'btn', i });
-      return {
-        name: '8BITDO D-INPUT',
-        buttons: {
-          burst: b(1), aura: b(0), expand: b(4), recenter: b(3),
-          ghost: b(6), stand: b(7), slowmo: b(8), charge: b(9),
-          audio: b(10), hud: b(11), blackout: b(13), strobe: b(14),
-          up: { t: 'hat', dir: 'up' }, down: { t: 'hat', dir: 'down' },
-          left: { t: 'hat', dir: 'left' }, right: { t: 'hat', dir: 'right' },
-        },
-        axes: { lx: { i: 0, sign: 1 }, ly: { i: 1, sign: 1 }, rx: { i: 2, sign: 1 }, ry: { i: 5, sign: 1 } },
-      };
-    }
-
-    // Chrome exposes D-input hats as an extra axis resting outside [-1, 1]
-    // (typically ~1.29); the eight positions land on -1 + k * 2/7.
-    let hatAxisIndex = -1;
-    const HAT_DIRS = { up: [7, 0, 1], right: [1, 2, 3], down: [3, 4, 5], left: [5, 6, 7] };
-
-    function updateHatAxis(gp) {
-      if (hatAxisIndex >= 0 && gp.axes[hatAxisIndex] !== undefined) return;
-      for (let i = 0; i < gp.axes.length; i++) {
-        if ((gp.axes[i] || 0) > 1.05) { hatAxisIndex = i; return; }
-      }
-    }
-
-    function bindingValue(gp, b) {
-      if (!b) return 0;
-      if (b.t === 'btn') {
-        const btn = gp.buttons[b.i];
-        return btn ? (btn.value || (btn.pressed ? 1 : 0)) : 0;
-      }
-      if (b.t === 'hat') {
-        const i = b.i !== undefined && b.i >= 0 ? b.i : hatAxisIndex;
-        if (i < 0) return 0;
-        const v = gp.axes[i];
-        if (v === undefined || v > 1.02 || v < -1.02) return 0;
-        const k = Math.round((v + 1) * 3.5) % 8;
-        return (HAT_DIRS[b.dir] || []).includes(k) ? 1 : 0;
-      }
-      if (b.t === 'axisbtn') {
-        const v = gp.axes[b.i];
-        if (v === undefined) return 0;
-        const d = b.target - b.rest;
-        if (!d) return 0;
-        return clamp((v - b.rest) / d, 0, 1);
-      }
-      return 0;
-    }
-
-    function axisValue(gp, a) {
-      if (!a) return 0;
-      const v = gp.axes[a.i];
-      return v === undefined ? 0 : v * a.sign;
-    }
-
-    let profile = null;
-    let profileForId = null;
-    const PROFILE_STORE_PREFIX = 'gamepad-spotlight-profile:';
-
-    function loadSavedProfile(id) {
-      try {
-        const raw = localStorage.getItem(PROFILE_STORE_PREFIX + id);
-        return raw ? JSON.parse(raw) : null;
-      } catch (err) {
-        return null;
-      }
-    }
-
-    function saveStoredProfile(id, p) {
-      try {
-        localStorage.setItem(PROFILE_STORE_PREFIX + id, JSON.stringify(p));
-      } catch (err) { /* private mode / file:// quirks — profile lives for the session */ }
-    }
-
-    function selectProfile(gp) {
-      profileForId = gp.id;
-      const saved = loadSavedProfile(gp.id);
-      if (saved) {
-        profile = saved;
-        toast('SAVED PAD PROFILE');
-        return;
-      }
-      if (gp.mapping === 'standard') {
-        profile = standardProfile();
-        return;
-      }
-      if (/8bitdo|2dc8/i.test(gp.id)) {
-        profile = dinput8BitDoProfile();
-        toast('8BITDO D-INPUT — PRESS C TO CALIBRATE');
-        return;
-      }
-      // Unknown non-standard layout: fall back to standard indices and walk
-      // the user through calibration.
-      profile = standardProfile();
-      startCalibration(gp);
-    }
-
-    // ---- On-screen calibration ----------------------------------------------
-    // Walks through every control: press what's asked, it captures whichever
-    // button/axis moved. Handles buttons, analog-trigger axes, and hat D-pads.
-    // Auto-starts for unknown non-standard pads; C restarts it anytime.
-    const CAL_STEPS = [
-      { key: 'burst', label: 'PRESS A — BURST' },
-      { key: 'aura', label: 'PRESS B — AURA' },
-      { key: 'expand', label: 'PRESS X — EXPAND' },
-      { key: 'recenter', label: 'PRESS Y — RECENTER' },
-      { key: 'ghost', label: 'PRESS LB — GHOST' },
-      { key: 'stand', label: 'PRESS RB — STAND' },
-      { key: 'slowmo', label: 'PULL LT — SLOW-MO' },
-      { key: 'charge', label: 'PULL RT — CHARGE' },
-      { key: 'audio', label: 'PRESS SELECT — AUDIO' },
-      { key: 'hud', label: 'PRESS START — HUD' },
-      { key: 'blackout', label: 'CLICK LEFT STICK — BLACKOUT' },
-      { key: 'strobe', label: 'CLICK RIGHT STICK — STROBE' },
-      { key: 'up', label: 'D-PAD UP — SPOT SIZE +' },
-      { key: 'down', label: 'D-PAD DOWN — SPOT SIZE −' },
-      { key: 'left', label: 'D-PAD LEFT — PALETTE' },
-      { key: 'right', label: 'D-PAD RIGHT — PALETTE' },
-      { key: 'lx', label: 'LEFT STICK — PUSH RIGHT', stick: true },
-      { key: 'ly', label: 'LEFT STICK — PUSH DOWN', stick: true },
-      { key: 'rx', label: 'RIGHT STICK — PUSH RIGHT', stick: true },
-      { key: 'ry', label: 'RIGHT STICK — PUSH DOWN', stick: true },
-    ];
-    const CAL_SETTLE_MS = isTestMode ? 60 : 300;
-
-    let calibration = null;
-
-    function startCalibration(gp) {
-      profileForId = gp.id;
-      calibration = {
-        padId: gp.id,
-        idx: 0,
-        phase: 'settle',
-        quietSince: null,
-        rest: null,
-        buttons: {},
-        axes: {},
-        prevProfile: profile,
-      };
-      calView.classList.remove('hidden');
-    }
-
-    function cancelCalibration() {
-      if (!calibration) return;
-      profile = calibration.prevProfile || standardProfile();
-      calibration = null;
-      calView.classList.add('hidden');
-      toast('CALIBRATION CANCELLED');
-    }
-
-    function skipCalStep() {
-      if (calibration) advanceCalStep();
-    }
-
-    function advanceCalStep() {
-      calibration.idx++;
-      calibration.phase = 'settle';
-      calibration.quietSince = null;
-      if (calibration.idx >= CAL_STEPS.length) finishCalibration();
-    }
-
-    function finishCalibration() {
-      const p = { name: 'CUSTOM', buttons: calibration.buttons, axes: calibration.axes };
-      profile = p;
-      saveStoredProfile(calibration.padId, p);
-      calibration = null;
-      calView.classList.add('hidden');
-      toast('PAD CALIBRATED');
-    }
-
-    function calQuiet(gp, rest) {
-      for (const b of gp.buttons) {
-        if (b && (b.pressed || b.value > 0.4)) return false;
-      }
-      if (rest) {
-        for (let i = 0; i < gp.axes.length; i++) {
-          if (Math.abs((gp.axes[i] || 0) - rest[i]) > 0.35) return false;
-        }
-      }
-      return true;
-    }
-
-    function runCalibration(gp, now) {
-      const step = CAL_STEPS[calibration.idx];
-      calLabel.textContent = step.label;
-      calProgress.textContent = `${calibration.idx + 1} / ${CAL_STEPS.length}`;
-
-      if (calibration.phase === 'settle') {
-        // Wait for everything released and axes back at rest, then re-snapshot
-        if (calQuiet(gp, calibration.rest)) {
-          if (calibration.quietSince === null) calibration.quietSince = now;
-          if (now - calibration.quietSince >= CAL_SETTLE_MS) {
-            calibration.rest = Array.from(gp.axes, (v) => v || 0);
-            calibration.phase = 'armed';
-          }
-        } else {
-          calibration.quietSince = null;
-        }
-        return;
-      }
-
-      // Armed: capture the first button press or big axis excursion
-      const rest = calibration.rest;
-      let capture = null;
-      for (let i = 0; i < gp.buttons.length; i++) {
-        const b = gp.buttons[i];
-        if (b && (b.pressed || b.value > 0.6)) { capture = { kind: 'btn', i }; break; }
-      }
-      if (!capture) {
-        let best = null;
-        for (let i = 0; i < gp.axes.length; i++) {
-          const delta = (gp.axes[i] || 0) - rest[i];
-          if (Math.abs(delta) > 0.55 && (!best || Math.abs(delta) > Math.abs(best.delta))) {
-            best = { i, delta, v: gp.axes[i] };
-          }
-        }
-        if (best) capture = { kind: 'axis', ...best };
-      }
-      if (!capture) return;
-
-      if (step.stick) {
-        if (capture.kind !== 'axis') return; // sticks must come from an axis
-        calibration.axes[step.key] = { i: capture.i, sign: capture.delta > 0 ? 1 : -1 };
-      } else if (capture.kind === 'btn') {
-        calibration.buttons[step.key] = { t: 'btn', i: capture.i };
-      } else if (rest[capture.i] > 1.05) {
-        calibration.buttons[step.key] = { t: 'hat', i: capture.i, dir: step.key };
-      } else {
-        calibration.buttons[step.key] = { t: 'axisbtn', i: capture.i, rest: rest[capture.i], target: capture.v };
-      }
-      advanceCalStep();
-    }
-
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'c' || e.key === 'C') {
-        const gp = activeGamepad();
-        if (gp && !calibration) startCalibration(gp);
-      } else if (calibration && e.key === 'Escape') {
-        cancelCalibration();
-      } else if (calibration && (e.key === 's' || e.key === 'S')) {
-        skipCalStep();
-      }
-    });
+    // Standard gamepad mapping (Xbox layout) — every button does something
+    const BTN_BURST = 0;      // A       tap: burst (+ stand barrage while stand is out)
+    const BTN_AURA = 1;       // B       tap: warm power-aura figure
+    const BTN_EXPAND = 2;     // X       hold: spotlight grows
+    const BTN_RECENTER = 3;   // Y       tap: snap to center
+    const BTN_GHOST = 4;      // LB      tap: spectral ghost aura + afterimages
+    const BTN_STAND = 5;      // RB      tap: summon the stand
+    const BTN_SLOWMO = 6;     // LT      analog hold: time dilation
+    const BTN_CHARGE = 7;     // RT      analog hold: charge in, release: nova
+    const BTN_AUDIO = 8;      // Select  tap: audio-reactive mode (mic / interface)
+    const BTN_HUD = 9;        // Start   tap: HUD overlay
+    const BTN_BLACKOUT = 10;  // L3      tap: blackout
+    const BTN_STROBE = 11;    // R3      tap: strobe (beat-synced when audio is on)
+    const BTN_DPAD_UP = 12;   //         spot size +
+    const BTN_DPAD_DOWN = 13; //         spot size −
+    const BTN_DPAD_LEFT = 14; //         palette −
+    const BTN_DPAD_RIGHT = 15;//         palette +
 
     const EXPAND_TARGET_SCALE = 2.5;
     const EXPAND_SPRING_RATE = 12;
@@ -547,7 +260,8 @@
     let lastDrawTime = performance.now();
 
     let gamepadConnected = false;
-    let prevDown = {};
+    let prevButtons = [];
+    let mappingWarned = false;
 
     let expandActive = false;
     let auraActive = false;
@@ -643,36 +357,35 @@
       gamepadConnected = !!gp;
       if (gamepadConnected !== wasConnected) renderViews();
       if (!gp) {
-        prevDown = {};
-        if (calibration) cancelCalibration();
+        prevButtons = [];
         return;
       }
-
-      if (gp.id !== profileForId) selectProfile(gp);
-      updateHatAxis(gp);
-
-      if (calibration) {
-        runCalibration(gp, now);
-        prevDown = {};
-        return;
-      }
-
-      const lv = (name) => bindingValue(gp, profile.buttons[name]);
-      const isDown = (name) => lv(name) > 0.5;
-      const edge = (name) => isDown(name) && !prevDown[name];
 
       // Left stick — move the spotlight (velocity model)
-      const stick = applyStickCurve(axisValue(gp, profile.axes.lx), axisValue(gp, profile.axes.ly));
+      const stick = applyStickCurve(gp.axes[0] || 0, gp.axes[1] || 0);
       const ySign = INVERT_Y ? -1 : 1;
       pointerX = clamp(pointerX + stick.x * MOVE_SPEED * dt, 0, 1);
       pointerY = clamp(pointerY + stick.y * ySign * MOVE_SPEED * dt, 0, 1);
 
-      // Right stick — aim the stand, and lean embers/wisps into the wind
-      const rxv = axisValue(gp, profile.axes.rx);
-      const ryv = axisValue(gp, profile.axes.ry);
-      const rstick = applyStickCurve(rxv, ryv, 0.18);
-      if (rstick.mag > 0) {
-        standAngle = angleLerp(standAngle, Math.atan2(ryv, rxv), 10, dt);
+      // Non-standard pads report different indices/axes; warn once so a
+      // misbehaving layout is diagnosable instead of mysterious.
+      const isStandardPad = gp.mapping === 'standard';
+      if (!isStandardPad && !mappingWarned) {
+        mappingWarned = true;
+        toast('NON-STANDARD PAD — MAPPING MAY DIFFER');
+      }
+
+      // Right stick — aim the stand, and lean embers/wisps into the wind.
+      // Only trust axes 2/3 on standard mapping: elsewhere they are often
+      // analog triggers resting at -1, which would slam the wind/stand aim.
+      let rstick = { x: 0, y: 0, mag: 0 };
+      if (isStandardPad && gp.axes.length >= 4) {
+        const rx = gp.axes[2] || 0;
+        const ry = gp.axes[3] || 0;
+        rstick = applyStickCurve(rx, ry, 0.18);
+        if (rstick.mag > 0) {
+          standAngle = angleLerp(standAngle, Math.atan2(ry, rx), 10, dt);
+        }
       }
       const w = window.innerWidth;
       const h = window.innerHeight;
@@ -680,37 +393,41 @@
       windX = smoothFollow(windX, rstick.x * windScale, 6, dt);
       windY = smoothFollow(windY, rstick.y * windScale, 6, dt);
 
-      if (edge('burst')) {
+      const pressed = (i) => !!(gp.buttons[i] && gp.buttons[i].pressed);
+      const value = (i) => (gp.buttons[i] ? gp.buttons[i].value || (gp.buttons[i].pressed ? 1 : 0) : 0);
+      const edge = (i) => pressed(i) && !prevButtons[i];
+
+      if (edge(BTN_BURST)) {
         const cx = currentX ?? pointerX * w;
         const cy = currentY ?? pointerY * h;
         spawnBurst(cx, cy, effMs, { power: 1 });
         if (standActive) spawnBarrage(standX, standY, cx, cy, effMs);
       }
-      expandActive = isDown('expand');
-      if (edge('aura')) {
+      expandActive = pressed(BTN_EXPAND);
+      if (edge(BTN_AURA)) {
         auraActive = !auraActive;
         setFormationTarget(auraFormation, auraActive);
       }
-      if (edge('recenter')) {
+      if (edge(BTN_RECENTER)) {
         pointerX = 0.5;
         pointerY = 0.5;
       }
-      if (edge('ghost')) {
+      if (edge(BTN_GHOST)) {
         ghostActive = !ghostActive;
         setFormationTarget(ghostFormation, ghostActive);
         toast(ghostActive ? 'GHOST' : 'GHOST OFF');
       }
-      if (edge('stand')) {
+      if (edge(BTN_STAND)) {
         standActive = !standActive;
         setFormationTarget(standFormation, standActive);
         toast(standActive ? 'STAND' : 'STAND OFF');
       }
-      if (edge('audio')) toggleAudio();
-      if (edge('hud')) {
+      if (edge(BTN_AUDIO)) toggleAudio();
+      if (edge(BTN_HUD)) {
         hudVisible = !hudVisible;
         hudEl.classList.toggle('visible', hudVisible);
       }
-      if (edge('blackout')) {
+      if (edge(BTN_BLACKOUT)) {
         blackoutActive = !blackoutActive;
         animate(blackoutFade, {
           v: blackoutActive ? 1 : 0,
@@ -719,20 +436,20 @@
         });
         toast(blackoutActive ? 'BLACKOUT' : 'LIGHTS');
       }
-      if (edge('strobe')) {
+      if (edge(BTN_STROBE)) {
         strobeActive = !strobeActive;
         toast(strobeActive ? 'STROBE' : 'STROBE OFF');
       }
-      if (edge('up')) radiusBase = clamp(radiusBase + RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
-      if (edge('down')) radiusBase = clamp(radiusBase - RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
-      if (edge('left')) cyclePalette(-1);
-      if (edge('right')) cyclePalette(1);
+      if (edge(BTN_DPAD_UP)) radiusBase = clamp(radiusBase + RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
+      if (edge(BTN_DPAD_DOWN)) radiusBase = clamp(radiusBase - RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
+      if (edge(BTN_DPAD_LEFT)) cyclePalette(-1);
+      if (edge(BTN_DPAD_RIGHT)) cyclePalette(1);
 
       // LT — analog time dilation (visuals only; input stays real-time)
-      timeScale = 1 - SLOWMO_DEPTH * clamp(lv('slowmo'), 0, 1);
+      timeScale = 1 - SLOWMO_DEPTH * clamp(value(BTN_SLOWMO), 0, 1);
 
       // RT — analog charge; release above threshold detonates a nova
-      const trig = clamp(lv('charge'), 0, 1);
+      const trig = clamp(value(BTN_CHARGE), 0, 1);
       const wasCharging = charging;
       charging = trig > TRIGGER_THRESHOLD;
       if (charging) {
@@ -745,9 +462,7 @@
       chargeActivity = smoothFollow(chargeActivity, charging ? 0.3 + 0.7 * trig : 0, 8, dt);
       if (!charging) chargeLevel = smoothFollow(chargeLevel, 0, 6, dt);
 
-      const next = {};
-      for (const name of LOGICAL_BUTTONS) next[name] = isDown(name);
-      prevDown = next;
+      prevButtons = gp.buttons.map((b) => b.pressed);
     }
 
     function renderViews() {
@@ -1601,7 +1316,6 @@
     function renderHud() {
       if (!hudVisible) return;
       const parts = [
-        profile ? profile.name : '—',
         PALETTES[paletteIndex].name,
         `SPOT ${Math.round(radiusBase * 100)}`,
         audioEnabled ? `AUDIO ●  BASS ${audio.bass.toFixed(2)}  MID ${audio.mid.toFixed(2)}  TREB ${audio.treb.toFixed(2)}` : 'AUDIO ○',
@@ -1674,9 +1388,6 @@
         hudVisible,
         audioEnabled,
         timeScale,
-        profileName: profile ? profile.name : null,
-        calibrationActive: !!calibration,
-        calibrationStep: calibration ? CAL_STEPS[calibration.idx].key : null,
       };
     }
 

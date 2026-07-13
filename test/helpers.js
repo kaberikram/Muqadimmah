@@ -13,20 +13,19 @@ function sleep(ms) {
 }
 
 /**
- * Install a fake gamepad before any page script runs (standard mapping by
- * default; pass opts to fake a D-input pad). Tests mutate it via
- * setAxes / setButton / setAxis below.
+ * Install a fake standard-mapping gamepad before any page script runs.
+ * Tests mutate it via setAxes / setButton below.
  */
-async function installMockGamepad(page, opts = {}) {
-  await page.addInitScript((opts) => {
+async function installMockGamepad(page) {
+  await page.addInitScript(() => {
     const pad = {
-      id: opts.id || 'Mock Gamepad (STANDARD GAMEPAD)',
+      id: 'Mock Gamepad (STANDARD GAMEPAD)',
       index: 0,
       connected: true,
-      mapping: opts.mapping !== undefined ? opts.mapping : 'standard',
+      mapping: 'standard',
       timestamp: 0,
-      axes: opts.axes ? opts.axes.slice() : [0, 0, 0, 0],
-      buttons: Array.from({ length: opts.buttonCount || 17 }, () => ({
+      axes: [0, 0, 0, 0],
+      buttons: Array.from({ length: 17 }, () => ({
         pressed: false,
         touched: false,
         value: 0,
@@ -34,7 +33,7 @@ async function installMockGamepad(page, opts = {}) {
     };
     window.__mockGamepad = pad;
     navigator.getGamepads = () => [pad];
-  }, opts);
+  });
 }
 
 async function openProjector(page) {
@@ -49,15 +48,6 @@ function setAxes(page, x, y) {
       window.__mockGamepad.axes[1] = ay;
     },
     [x, y]
-  );
-}
-
-function setAxis(page, index, value) {
-  return page.evaluate(
-    ([i, v]) => {
-      window.__mockGamepad.axes[i] = v;
-    },
-    [index, value]
   );
 }
 
@@ -155,7 +145,6 @@ module.exports = {
   installMockGamepad,
   openProjector,
   setAxes,
-  setAxis,
   setRightStick,
   setButton,
   tapButton,
