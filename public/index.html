@@ -795,25 +795,61 @@
       };
     }
 
-    // Radiant orb: a soft-edged gaussian shell with a hot inner fill and a
-    // wide halo of stray haze bleeding off it.
-    function sampleOrbPoint() {
-      const dir = randomOnSphere();
-      const stray = Math.random() < 0.22;
-      const core = !stray && Math.random() < 0.25;
-      const r = stray
-        ? 0.44 * (1.15 + Math.random() * 1.5)
-        : core
-          ? 0.40 * Math.pow(Math.random(), 1.7)
-          : 0.42 + gaussRandom() * 0.05;
-      return {
-        x: dir.x * r,
-        y: -0.22 + dir.y * r * 0.94,
-        z: dir.z * r,
-        wingS: 0, side: 1,
-        colorT: Math.min(1, r / 0.62 + (stray ? 0.25 : 0)),
-        dim: stray ? 0.30 + Math.random() * 0.3 : core ? 1.0 : 0.75 + Math.random() * 0.25,
-      };
+    // Dove banking mid-glide: body leaned into the turn, wings swept back
+    // with separated primary feathers at the tips, tail fanned to one side.
+    // Distinct pose from BIRD below — this one reads as gliding, not flapping
+    // square-on — but it still carries wingS so the flap wave animates it too.
+    function sampleGlidePoint() {
+      const u = Math.random();
+      const stray = Math.random() < 0.12;
+      let p;
+      if (u < 0.26) {
+        // Body: diagonal, leaned into the bank
+        const t = Math.random();
+        const along = -0.52 + t * 0.62;
+        const w = 0.045 + 0.055 * Math.sin(Math.min(1, t * 1.2) * Math.PI);
+        const bank = 0.22;
+        p = {
+          x: gaussRandom() * w * 0.5 + along * bank,
+          y: along,
+          z: gaussRandom() * w * 0.4,
+          wingS: 0, side: 1,
+          colorT: 0.1 + t * 0.25 + Math.random() * 0.15,
+        };
+      } else if (u < 0.36) {
+        // Tail: fanned feathers swept to one side
+        const len = 0.08 + Math.random() * 0.24;
+        const spread = -0.15 + Math.random() * 0.55;
+        p = {
+          x: spread * len * 1.3 + len * 0.22,
+          y: 0.06 + len * 0.92,
+          z: gaussRandom() * 0.02,
+          wingS: 0, side: 1,
+          colorT: 0.45 + len * 0.9 + Math.random() * 0.1,
+        };
+      } else {
+        // Wings: swept back at an angle, feather fingers separating near the tips
+        const side = Math.random() < 0.5 ? -1 : 1;
+        const s = Math.pow(Math.random(), 0.7);
+        const chord = Math.random();
+        const span = 0.09 + s * 0.64;
+        const sweep = s * s * 0.30; // tip trails backward/down into the bank
+        const finger = s > 0.72 ? Math.sin(chord * Math.PI * 4 + side) * 0.018 * (s - 0.72) * 3.6 : 0;
+        p = {
+          x: side * span,
+          y: -0.30 + chord * (0.09 + s * 0.30) + sweep + finger,
+          z: gaussRandom() * 0.03 + side * s * 0.05,
+          wingS: s, side,
+          colorT: Math.min(1, 0.22 + s * 0.58 + Math.random() * 0.15),
+        };
+      }
+      if (stray) {
+        p.x += gaussRandom() * 0.08;
+        p.y += gaussRandom() * 0.08;
+        p.z += gaussRandom() * 0.08;
+      }
+      p.dim = stray ? 0.35 + Math.random() * 0.3 : 0.8 + Math.random() * 0.2;
+      return p;
     }
 
     // Bird seen front-on, wings spread — the flap is applied at render time
@@ -868,10 +904,9 @@
     // shape so cycling morphs the same cloud rather than swapping models.
     const AURA_SHAPES = [
       { name: 'SOUL', sample: sampleSoulPoint },
-      { name: 'ORB', sample: sampleOrbPoint },
+      { name: 'DOVE', sample: sampleGlidePoint },
       { name: 'BIRD', sample: sampleBirdPoint },
     ];
-    const BIRD_SHAPE_INDEX = 2;
     let auraShapeIndex = 0;
     let auraShapeFrom = 0;
     const shapeBlend = { v: 1 };
@@ -1134,8 +1169,8 @@
       const to = auraShapeIndex;
       const bl = shapeBlend.v;
       const smoothBl = bl * bl * (3 - 2 * bl);
-      const shapeY = (sp, shapeIdx) => {
-        if (shapeIdx === BIRD_SHAPE_INDEX && sp.wingS > 0) {
+      const shapeY = (sp) => {
+        if (sp.wingS > 0) {
           return sp.y - Math.sin(flapPhase - sp.wingS * 1.6) * Math.pow(sp.wingS, 1.2) * 0.30;
         }
         return sp.y;
@@ -1146,7 +1181,7 @@
         const pa = p.shapes[from];
         const pb = p.shapes[to];
         const bx = pa.x + (pb.x - pa.x) * smoothBl;
-        const by = shapeY(pa, from) + (shapeY(pb, to) - shapeY(pa, from)) * smoothBl;
+        const by = shapeY(pa) + (shapeY(pb) - shapeY(pa)) * smoothBl;
         const bz = pa.z + (pb.z - pa.z) * smoothBl;
         const colorT = pa.colorT + (pb.colorT - pa.colorT) * smoothBl;
         const dim = pa.dim + (pb.dim - pa.dim) * smoothBl;
