@@ -77,13 +77,12 @@
     <p>Plug in or pair a gamepad, then <strong style="color:#fff">press any button</strong> to start.</p>
     <div class="map">
       <div><b>L-stick</b> move spot</div>
-      <div><b>R-stick</b> aim stand · wind</div>
-      <div><b>A</b> burst / stand barrage</div>
+      <div><b>R-stick</b> wind</div>
+      <div><b>A</b> burst</div>
       <div><b>B</b> power aura</div>
       <div><b>X</b> (hold) expand</div>
       <div><b>Y</b> recenter</div>
       <div><b>LB</b> ghost aura</div>
-      <div><b>RB</b> summon stand</div>
       <div><b>LT</b> (hold) slow motion</div>
       <div><b>RT</b> (hold) charge → nova</div>
       <div><b>D-pad ↑↓</b> spot size</div>
@@ -98,8 +97,8 @@
   <canvas id="spotlight-canvas"></canvas>
 
   <div id="hud">
-    <div><b>L-stick</b> move · <b>R-stick</b> aim/wind · <b>A</b> burst · <b>B</b> aura · <b>X</b> expand · <b>Y</b> recenter</div>
-    <div><b>LB</b> ghost · <b>RB</b> stand · <b>LT</b> slow-mo · <b>RT</b> charge · <b>D-pad</b> size/palette</div>
+    <div><b>L-stick</b> move · <b>R-stick</b> wind · <b>A</b> burst · <b>B</b> aura · <b>X</b> expand · <b>Y</b> recenter</div>
+    <div><b>LB</b> ghost · <b>LT</b> slow-mo · <b>RT</b> charge · <b>D-pad</b> size/palette</div>
     <div><b>L3</b> blackout · <b>R3</b> strobe · <b>Select</b> audio · <b>Start</b> hide this</div>
     <div id="hud-status"></div>
   </div>
@@ -137,12 +136,12 @@
     const FOLLOW_RATE = 28;       // spotlight easing toward the pointer
 
     // Standard gamepad mapping (Xbox layout) — every button does something
-    const BTN_BURST = 0;      // A       tap: burst (+ stand barrage while stand is out)
+    const BTN_BURST = 0;      // A       tap: burst
     const BTN_AURA = 1;       // B       tap: warm power-aura figure
     const BTN_EXPAND = 2;     // X       hold: spotlight grows
     const BTN_RECENTER = 3;   // Y       tap: snap to center
     const BTN_GHOST = 4;      // LB      tap: spectral ghost aura + afterimages
-    const BTN_STAND = 5;      // RB      tap: summon the stand
+    // index 5 (RB) is currently unbound
     const BTN_SLOWMO = 6;     // LT      analog hold: time dilation
     const BTN_CHARGE = 7;     // RT      analog hold: charge in, release: nova
     const BTN_AUDIO = 8;      // Select  tap: audio-reactive mode (mic / interface)
@@ -159,10 +158,6 @@
     const BURST_DURATION_MS = 1200;
     const BURST_PARTICLE_COUNT = 40;
     const BURST_POOL_SIZE = 10; // max concurrent bursts with visible ring/flash geometry
-
-    const BARRAGE_POOL_SIZE = 4;
-    const BARRAGE_PARTICLE_COUNT = 26;
-    const BARRAGE_DURATION_MS = 560;
 
     const TRIGGER_THRESHOLD = 0.06;   // analog triggers register above this
     const CHARGE_RATE = 0.9;          // charge/sec at full trigger pull
@@ -202,13 +197,8 @@
         { t: 1.0, r: 120, g: 120, b: 130 },
       ] },
     ];
-    // Fixed palettes: the ghost is always spectral, the stand always violet.
+    // Fixed palette: the ghost is always spectral.
     const GHOST_STOPS = PALETTES[1].stops;
-    const STAND_STOPS = [
-      { t: 0.0, r: 255, g: 235, b: 255 },
-      { t: 0.5, r: 235, g: 120, b: 255 },
-      { t: 1.0, r: 140, g: 90, b: 255 },
-    ];
 
     function lerpStops(stops, t) {
       t = clamp(t, 0, 1);
@@ -266,14 +256,12 @@
     let expandActive = false;
     let auraActive = false;
     let ghostActive = false;
-    let standActive = false;
     let strobeActive = false;
     let blackoutActive = false;
     let hudVisible = false;
     let radiusScale = 1;
     let radiusBase = RADIUS_BASE_DEFAULT;
     let bursts = [];
-    let barrages = [];
     let auraPhase = 0;
 
     // Scaled effect clock: LT dilates this, control input stays real-time.
@@ -286,12 +274,9 @@
     let chargeLevel = 0;
     let chargeActivity = 0; // smoothed trigger pull, drives inflow particle alpha
 
-    // Stand aim (right stick) + wind
-    let standAngle = -2.2;  // default: hovers up-left of the spot
+    // Wind (right stick)
     let windX = 0;
     let windY = 0;
-    let standX = 0;
-    let standY = 0;
 
     // Ghost afterimage lag positions
     let echoAX = null, echoAY = null;
@@ -304,14 +289,6 @@
     function smoothFollow(current, target, rate, dt) {
       const alpha = 1 - Math.exp(-rate * dt);
       return current + (target - current) * alpha;
-    }
-
-    function angleLerp(current, target, rate, dt) {
-      let diff = target - current;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      const alpha = 1 - Math.exp(-rate * dt);
-      return current + diff * alpha;
     }
 
     function resizeCanvas() {
@@ -375,17 +352,14 @@
         toast('NON-STANDARD PAD — MAPPING MAY DIFFER');
       }
 
-      // Right stick — aim the stand, and lean embers/wisps into the wind.
+      // Right stick — lean embers/wisps into the wind.
       // Only trust axes 2/3 on standard mapping: elsewhere they are often
-      // analog triggers resting at -1, which would slam the wind/stand aim.
+      // analog triggers resting at -1, which would slam the wind.
       let rstick = { x: 0, y: 0, mag: 0 };
       if (isStandardPad && gp.axes.length >= 4) {
         const rx = gp.axes[2] || 0;
         const ry = gp.axes[3] || 0;
         rstick = applyStickCurve(rx, ry, 0.18);
-        if (rstick.mag > 0) {
-          standAngle = angleLerp(standAngle, Math.atan2(ry, rx), 10, dt);
-        }
       }
       const w = window.innerWidth;
       const h = window.innerHeight;
@@ -401,7 +375,6 @@
         const cx = currentX ?? pointerX * w;
         const cy = currentY ?? pointerY * h;
         spawnBurst(cx, cy, effMs, { power: 1 });
-        if (standActive) spawnBarrage(standX, standY, cx, cy, effMs);
       }
       expandActive = pressed(BTN_EXPAND);
       if (edge(BTN_AURA)) {
@@ -416,11 +389,6 @@
         ghostActive = !ghostActive;
         setFormationTarget(ghostFormation, ghostActive);
         toast(ghostActive ? 'GHOST' : 'GHOST OFF');
-      }
-      if (edge(BTN_STAND)) {
-        standActive = !standActive;
-        setFormationTarget(standFormation, standActive);
-        toast(standActive ? 'STAND' : 'STAND OFF');
       }
       if (edge(BTN_AUDIO)) toggleAudio();
       if (edge(BTN_HUD)) {
@@ -586,25 +554,8 @@
       if (shake) shakeCamera(power);
     }
 
-    function spawnBarrage(ox, oy, tx, ty, tMs) {
-      const baseAngle = Math.atan2(ty - oy, tx - ox);
-      const particles = [];
-      for (let i = 0; i < BARRAGE_PARTICLE_COUNT; i++) {
-        particles.push({
-          angle: baseAngle + (Math.random() - 0.5) * 0.55,
-          speed: 900 + Math.random() * 800,
-          size: 1.5 + Math.random() * 2.5,
-          life: 0.35 + Math.random() * 0.35,
-          delay: Math.random() * 160, // staggered rapid-fire jabs
-        });
-      }
-      barrages.push({ x: ox, y: oy, startTime: tMs, particles });
-      shakeCamera(0.5);
-    }
-
     function cullEffects(tMs) {
       bursts = bursts.filter((b) => tMs - b.startTime < BURST_DURATION_MS);
-      barrages = barrages.filter((b) => tMs - b.startTime < BARRAGE_DURATION_MS);
     }
 
     function baseRadius(w, h) {
@@ -621,17 +572,14 @@
     let figureGroup = null;
     let emberGroup = null;
     let ghostGroup = null;
-    let standGroup = null;
     let chargeGroup = null;
     let burstGroup = null;
-    let barrageGroup = null;
     let flashMesh = null;
     let blackMesh = null;
     let discMesh = null;
     let haloMesh = null;
     const auraIntensityUniform = uniform(0);
     const ghostIntensityUniform = uniform(0);
-    const standIntensityUniform = uniform(0);
     const discCoreUniform = uniform(new THREE.Color(1, 1, 1));
     const discMidUniform = uniform(new THREE.Color(1, 1, 1));
     const discRimUniform = uniform(new THREE.Color(1, 1, 1));
@@ -927,19 +875,6 @@
       ghostGroup.points.visible = false;
       scene.add(ghostGroup.points);
 
-      // The stand — a second violet figure hovering beside the spot
-      const STAND_COUNT = 480;
-      standGroup = makeParticleGroup(STAND_COUNT, {
-        shimmer: { intensity: standIntensityUniform, amp: 6.0, speed: 0.7 },
-      });
-      standGroup.model = buildFigureModel(STAND_COUNT);
-      standGroup.points.visible = false;
-      scene.add(standGroup.points);
-
-      // Barrage streaks (stand rapid-fire jabs), pooled
-      barrageGroup = makeParticleGroup(BARRAGE_POOL_SIZE * BARRAGE_PARTICLE_COUNT);
-      scene.add(barrageGroup.points);
-
       // Burst sparks (shared pool across all concurrently active bursts)
       const BURST_TOTAL = BURST_POOL_SIZE * BURST_PARTICLE_COUNT;
       burstGroup = makeParticleGroup(BURST_TOTAL);
@@ -1109,37 +1044,6 @@
       commitGroup(ghostGroup);
     }
 
-    function updateStand(cx, cy, w, h, formation) {
-      const visible = formation > 0.001;
-      standGroup.points.visible = visible;
-      const minDim = Math.min(w, h);
-      const orbit = minDim * 0.34;
-      standX = cx + Math.cos(standAngle) * orbit;
-      standY = cy + Math.sin(standAngle) * orbit + Math.sin(effT * 1.7) * minDim * 0.012;
-      if (!visible) return;
-
-      const figureScale = baseRadius(w, h) * 1.55;
-      const scatterT = 1 - formation;
-      const { positions, colors, sizes, model, count } = standGroup;
-      for (let i = 0; i < count; i++) {
-        const p = model[i];
-        const lx = p.base.x + p.scatter.x * scatterT;
-        const ly = p.base.y + p.scatter.y * scatterT;
-        const lz = p.base.z + p.scatter.z * scatterT;
-        const idx3 = i * 3;
-        positions[idx3] = standX + lx * figureScale;
-        positions[idx3 + 1] = standY + ly * figureScale;
-        positions[idx3 + 2] = lz * figureScale;
-        const c = lerpStops(STAND_STOPS, p.colorT);
-        const alpha = formation * (0.8 + 0.2 * Math.sin(effT * 2.3 + p.colorT * 12));
-        colors[idx3] = c.r * alpha;
-        colors[idx3 + 1] = c.g * alpha;
-        colors[idx3 + 2] = c.b * alpha;
-        sizes[i] = p.size * 0.9;
-      }
-      commitGroup(standGroup);
-    }
-
     function updateCharge(cx, cy, radius) {
       const activity = chargeActivity;
       const visible = activity > 0.01;
@@ -1237,49 +1141,9 @@
       return maxFlash;
     }
 
-    function updateBarrages(tMs) {
-      const { positions, colors, sizes, count } = barrageGroup;
-      let slot = 0;
-
-      for (let b = 0; b < barrages.length && b < BARRAGE_POOL_SIZE; b++) {
-        const barrage = barrages[b];
-        for (const p of barrage.particles) {
-          if (slot >= count) break;
-          const idx3 = slot * 3;
-          const elapsed = tMs - barrage.startTime - p.delay;
-          const lifeT = elapsed / (BARRAGE_DURATION_MS * p.life);
-          if (elapsed < 0 || lifeT >= 1) {
-            colors[idx3] = colors[idx3 + 1] = colors[idx3 + 2] = 0;
-            sizes[slot] = 0;
-          } else {
-            const dist = p.speed * (elapsed / 1000);
-            positions[idx3] = barrage.x + Math.cos(p.angle) * dist;
-            positions[idx3 + 1] = barrage.y + Math.sin(p.angle) * dist;
-            positions[idx3 + 2] = 0;
-            const pAlpha = Math.max(0, 1 - lifeT);
-            const c = lerpStops(STAND_STOPS, lifeT * 0.8);
-            colors[idx3] = c.r * pAlpha;
-            colors[idx3 + 1] = c.g * pAlpha;
-            colors[idx3 + 2] = c.b * pAlpha;
-            sizes[slot] = p.size * 2.2;
-          }
-          slot++;
-        }
-      }
-
-      for (; slot < count; slot++) {
-        const idx3 = slot * 3;
-        colors[idx3] = colors[idx3 + 1] = colors[idx3 + 2] = 0;
-        sizes[slot] = 0;
-      }
-
-      commitGroup(barrageGroup);
-    }
-
     // ---- animejs-driven feel -----------------------------------------------
     const auraFormation = { v: 0 };
     const ghostFormation = { v: 0 };
-    const standFormation = { v: 0 };
     const blackoutFade = { v: 0 };
     function setFormationTarget(formation, active) {
       animate(formation, {
@@ -1373,12 +1237,9 @@
         radiusScale,
         radiusBase,
         activeBurstCount: bursts.length,
-        activeBarrageCount: barrages.length,
         auraActive,
         expandActive,
         ghostActive,
-        standActive,
-        standAngle,
         paletteIndex,
         charging,
         chargeLevel,
@@ -1433,10 +1294,8 @@
 
       const auraF = auraFormation.v;
       const ghostF = ghostFormation.v;
-      const standF = standFormation.v;
       auraIntensityUniform.value = auraF + audio.treb * 0.6;
       ghostIntensityUniform.value = ghostF * (1 + audio.treb);
-      standIntensityUniform.value = standF * (1 + audio.mid * 0.8);
 
       // Audio-reactive modulation: bass swells the spot, mids fatten the grain
       const audioR = 1 + audio.bass * 0.35 + audio.beatPulse * 0.12;
@@ -1464,9 +1323,7 @@
       updateFigure(currentX, currentY, figureScale, auraF);
       updateEmbers(currentX, currentY, figureScale, auraF);
       updateGhost(currentX, currentY, spotRadius, ghostF);
-      updateStand(currentX, currentY, w, h, standF);
       const burstFlash = updateBursts(effMs);
-      updateBarrages(effMs);
 
       // Flash plane: burst impact + strobe (beat-synced when audio is live)
       let strobe = 0;
