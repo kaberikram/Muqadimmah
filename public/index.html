@@ -84,9 +84,10 @@
       <div><b>X</b> (hold) expand</div>
       <div><b>Y</b> recenter</div>
       <div><b>LB</b> ghost aura</div>
+      <div><b>RB</b> spot size</div>
       <div><b>LT</b> (hold) slow motion</div>
       <div><b>RT</b> (hold) charge → nova</div>
-      <div><b>D-pad ↑↓</b> spot size</div>
+      <div><b>D-pad ↑↓</b> aura shape</div>
       <div><b>D-pad ←→</b> palette</div>
       <div><b>L3</b> blackout</div>
       <div><b>R3</b> strobe</div>
@@ -99,7 +100,7 @@
 
   <div id="hud">
     <div><b>L-stick</b> move · <b>R-stick</b> wind · <b>A</b> burst · <b>B</b> aura · <b>X</b> expand · <b>Y</b> recenter</div>
-    <div><b>LB</b> ghost · <b>LT</b> slow-mo · <b>RT</b> charge · <b>D-pad</b> size/palette</div>
+    <div><b>LB</b> ghost · <b>RB</b> size · <b>LT</b> slow-mo · <b>RT</b> charge · <b>D-pad</b> shape/palette</div>
     <div><b>L3</b> blackout · <b>R3</b> strobe · <b>Select</b> audio · <b>Start</b> hide this</div>
     <div id="hud-status"></div>
   </div>
@@ -110,7 +111,7 @@
 
     import * as THREE from 'three/webgpu';
     import {
-      Fn, uniform, time, vec3, sin, exp, float, atan,
+      Fn, uniform, time, vec3, sin, cos, exp, float, atan,
       instancedBufferAttribute, uv, smoothstep, mix,
       pass, screenUV,
     } from 'three/tsl';
@@ -144,15 +145,15 @@
     const BTN_EXPAND = 2;     // X       hold: spotlight grows
     const BTN_RECENTER = 3;   // Y       tap: snap to center
     const BTN_GHOST = 4;      // LB      tap: spectral ghost aura + afterimages
-    // index 5 (RB) is currently unbound
+    const BTN_SIZE = 5;       // RB      tap: step spot size (wraps)
     const BTN_SLOWMO = 6;     // LT      analog hold: time dilation
     const BTN_CHARGE = 7;     // RT      analog hold: charge in, release: nova
     const BTN_AUDIO = 8;      // Select  tap: audio-reactive mode (mic / interface)
     const BTN_HUD = 9;        // Start   tap: HUD overlay
     const BTN_BLACKOUT = 10;  // L3      tap: blackout
     const BTN_STROBE = 11;    // R3      tap: strobe (beat-synced when audio is on)
-    const BTN_DPAD_UP = 12;   //         spot size +
-    const BTN_DPAD_DOWN = 13; //         spot size −
+    const BTN_DPAD_UP = 12;   //         aura shape +
+    const BTN_DPAD_DOWN = 13; //         aura shape −
     const BTN_DPAD_LEFT = 14; //         palette −
     const BTN_DPAD_RIGHT = 15;//         palette +
 
@@ -416,8 +417,14 @@
         strobeActive = !strobeActive;
         toast(strobeActive ? 'STROBE' : 'STROBE OFF');
       }
-      if (edge(BTN_DPAD_UP)) radiusBase = clamp(radiusBase + RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
-      if (edge(BTN_DPAD_DOWN)) radiusBase = clamp(radiusBase - RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
+      if (edge(BTN_SIZE)) {
+        radiusBase = radiusBase + RADIUS_BASE_STEP > RADIUS_BASE_MAX + 1e-6
+          ? RADIUS_BASE_MIN
+          : radiusBase + RADIUS_BASE_STEP;
+        toast(`SPOT ${Math.round(radiusBase * 100)}`);
+      }
+      if (edge(BTN_DPAD_UP)) cycleAuraShape(1);
+      if (edge(BTN_DPAD_DOWN)) cycleAuraShape(-1);
       if (edge(BTN_DPAD_LEFT)) cyclePalette(-1);
       if (edge(BTN_DPAD_RIGHT)) cyclePalette(1);
 
@@ -654,12 +661,18 @@
       return { mesh, progress, power, cCore, cRim };
     }
 
-    // Soft round glow evaluated on the sprite quad in TSL — no texture involved.
-    // With real bloom on the WebGPU path the falloff is tightened, since the
-    // pass supplies the halo; the WebGL fallback keeps the wider fake glow.
-    function glowOpacityNode() {
-      const d = uv().sub(0.5).length().mul(2.0);
-      return smoothstep(1.0, 0.0, d).pow(forceWebGL ? 1.8 : 2.2);
+    // Feathered wisp evaluated on the sprite quad in TSL — no texture involved.
+    // An anisotropic gaussian rotated by a per-particle angle, so each sprite
+    // reads as a soft airy brush stroke instead of a hard round dot.
+    function wispOpacityNode(aSeed) {
+      const ang = aSeed.mul(6.283);
+      const ca = cos(ang);
+      const sa = sin(ang);
+      const q = uv().sub(0.5).mul(2.0);
+      const rx = q.x.mul(ca).sub(q.y.mul(sa));
+      const ry = q.x.mul(sa).add(q.y.mul(ca));
+      const dd = rx.mul(rx).add(ry.mul(ry).mul(5.5));
+      return exp(dd.mul(forceWebGL ? -2.4 : -3.0)).mul(0.85);
     }
 
     // Fat particles on WebGPU: point primitives are always 1px there, so each
@@ -700,8 +713,9 @@
           })()
         : aPos;
       material.colorNode = instancedBufferAttribute(colAttr);
-      material.sizeNode = instancedBufferAttribute(sizeAttr);
-      material.opacityNode = glowOpacityNode();
+      // Wisps cover less of the quad than round dots, so fatten them a bit
+      material.sizeNode = instancedBufferAttribute(sizeAttr).mul(1.5);
+      material.opacityNode = wispOpacityNode(aSeed);
 
       const points = new THREE.Sprite(material);
       points.count = count;
@@ -757,32 +771,128 @@
       return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
     }
 
+    function sampleSoulPoint() {
+      // Rejection-sample height so particle density follows the envelope
+      let y;
+      do { y = -0.95 + Math.random() * 1.40; }
+      while (Math.random() > 0.35 + silhouetteWidth(y) * 3.2);
+      const w = silhouetteWidth(y);
+      // A fraction of particles bleed off the form as loose haze
+      const stray = Math.random() < 0.18;
+      const r = stray ? w * (1.1 + Math.random() * 1.6) : w * Math.pow(Math.random(), 0.55);
+      const side = Math.random() < 0.5 ? -1 : 1;
+      // Faint lateral drift around arm height — a hint, not a limb
+      const armHint = (y > -0.60 && y < -0.15 && Math.random() < 0.14)
+        ? side * (0.10 + Math.random() * 0.16) * Math.sin(((y + 0.60) / 0.45) * Math.PI)
+        : 0;
+      const x = side * r * Math.abs(gaussRandom()) * 0.9 + armHint;
+      return {
+        x, y,
+        z: gaussRandom() * w * 0.8,
+        wingS: 0, side: 1,
+        colorT: Math.min(1, Math.abs(x) / (w + 1e-4) * 0.5 + (y + 0.95) / 1.4 * 0.35 + (stray ? 0.3 : 0)),
+        dim: stray ? 0.35 + Math.random() * 0.3 : 0.8 + Math.random() * 0.2,
+      };
+    }
+
+    // Radiant orb: a soft-edged gaussian shell with a hot inner fill and a
+    // wide halo of stray haze bleeding off it.
+    function sampleOrbPoint() {
+      const dir = randomOnSphere();
+      const stray = Math.random() < 0.22;
+      const core = !stray && Math.random() < 0.25;
+      const r = stray
+        ? 0.44 * (1.15 + Math.random() * 1.5)
+        : core
+          ? 0.40 * Math.pow(Math.random(), 1.7)
+          : 0.42 + gaussRandom() * 0.05;
+      return {
+        x: dir.x * r,
+        y: -0.22 + dir.y * r * 0.94,
+        z: dir.z * r,
+        wingS: 0, side: 1,
+        colorT: Math.min(1, r / 0.62 + (stray ? 0.25 : 0)),
+        dim: stray ? 0.30 + Math.random() * 0.3 : core ? 1.0 : 0.75 + Math.random() * 0.25,
+      };
+    }
+
+    // Bird seen front-on, wings spread — the flap is applied at render time
+    // from wingS (span fraction), so the whole wing rolls like a wingbeat.
+    function sampleBirdPoint() {
+      const u = Math.random();
+      const stray = Math.random() < 0.12;
+      let p;
+      if (u < 0.30) {
+        // Body: vertical teardrop, head up
+        const t = Math.random();
+        const y = -0.50 + t * 0.55;
+        const w = 0.05 + 0.07 * Math.sin(Math.min(1, t * 1.15) * Math.PI);
+        p = {
+          x: gaussRandom() * w * 0.55, y, z: gaussRandom() * w * 0.4,
+          wingS: 0, side: 1,
+          colorT: 0.1 + t * 0.25 + Math.random() * 0.15,
+        };
+      } else if (u < 0.42) {
+        // Tail fan below the body
+        const len = 0.10 + Math.random() * 0.26;
+        const spread = (Math.random() - 0.5) * 0.55;
+        p = {
+          x: spread * len * 1.4, y: 0.05 + len, z: gaussRandom() * 0.02,
+          wingS: 0, side: 1,
+          colorT: 0.45 + len * 0.9 + Math.random() * 0.1,
+        };
+      } else {
+        // Wings: denser near the body, feathering out along the span
+        const side = Math.random() < 0.5 ? -1 : 1;
+        const s = Math.pow(Math.random(), 0.72);
+        const chord = Math.random();
+        const span = 0.10 + s * 0.62;
+        p = {
+          x: side * span,
+          y: -0.30 + chord * (0.10 + s * 0.30) + s * s * 0.06,
+          z: gaussRandom() * 0.03,
+          wingS: s, side,
+          colorT: Math.min(1, 0.25 + s * 0.55 + Math.random() * 0.15),
+        };
+      }
+      if (stray) {
+        p.x += gaussRandom() * 0.08;
+        p.y += gaussRandom() * 0.08;
+        p.z += gaussRandom() * 0.08;
+      }
+      p.dim = stray ? 0.35 + Math.random() * 0.3 : 0.8 + Math.random() * 0.2;
+      return p;
+    }
+
+    // Aura shapes (D-pad ↑↓ cycles). Every particle carries a target in each
+    // shape so cycling morphs the same cloud rather than swapping models.
+    const AURA_SHAPES = [
+      { name: 'SOUL', sample: sampleSoulPoint },
+      { name: 'ORB', sample: sampleOrbPoint },
+      { name: 'BIRD', sample: sampleBirdPoint },
+    ];
+    const BIRD_SHAPE_INDEX = 2;
+    let auraShapeIndex = 0;
+    let auraShapeFrom = 0;
+    const shapeBlend = { v: 1 };
+
+    function cycleAuraShape(dir) {
+      auraShapeFrom = auraShapeIndex;
+      auraShapeIndex = (auraShapeIndex + dir + AURA_SHAPES.length) % AURA_SHAPES.length;
+      shapeBlend.v = 0;
+      animate(shapeBlend, { v: 1, duration: 750, ease: 'inOutQuad' });
+      toast(AURA_SHAPES[auraShapeIndex].name);
+    }
+
     function buildFigureModel(count) {
       const model = [];
       for (let i = 0; i < count; i++) {
-        // Rejection-sample height so particle density follows the envelope
-        let y;
-        do { y = -0.95 + Math.random() * 1.40; }
-        while (Math.random() > 0.35 + silhouetteWidth(y) * 3.2);
-        const w = silhouetteWidth(y);
-        // A fraction of particles bleed off the form as loose haze
-        const stray = Math.random() < 0.18;
-        const r = stray ? w * (1.1 + Math.random() * 1.6) : w * Math.pow(Math.random(), 0.55);
-        const side = Math.random() < 0.5 ? -1 : 1;
-        // Faint lateral drift around arm height — a hint, not a limb
-        const armHint = (y > -0.60 && y < -0.15 && Math.random() < 0.14)
-          ? side * (0.10 + Math.random() * 0.16) * Math.sin(((y + 0.60) / 0.45) * Math.PI)
-          : 0;
-        const x = side * r * Math.abs(gaussRandom()) * 0.9 + armHint;
-        const z = gaussRandom() * w * 0.8;
         const scatter = randomOnSphere();
         const scatterMag = 0.9 + Math.random() * 1.6;
         model.push({
-          base: { x, y, z },
+          shapes: AURA_SHAPES.map((s) => s.sample()),
           scatter: { x: scatter.x * scatterMag, y: scatter.y * scatterMag, z: scatter.z * scatterMag },
-          size: (stray ? 1.2 : 2) + Math.random() * 2.8,
-          colorT: Math.min(1, Math.abs(x) / (w + 1e-4) * 0.5 + (y + 0.95) / 1.4 * 0.35 + (stray ? 0.3 : 0)),
-          dim: stray ? 0.35 + Math.random() * 0.3 : 0.8 + Math.random() * 0.2,
+          size: 1.6 + Math.random() * 2.8,
           seed: Math.random(),
           driftAmp: 0.01 + Math.random() * 0.03,
           driftFreq: 0.4 + Math.random() * 1.2,
@@ -1018,13 +1128,32 @@
       // orthographic camera, so the cloud reads as a volume, not a cutout.
       const shearX = (pointerX - 0.5) * 0.35;
       const shearY = (pointerY - 0.5) * 0.25;
+      // Wingbeat: a wave that travels outward along the span, faster with music
+      const flapPhase = effT * (5.2 + audio.level * 3.5);
+      const from = auraShapeFrom;
+      const to = auraShapeIndex;
+      const bl = shapeBlend.v;
+      const smoothBl = bl * bl * (3 - 2 * bl);
+      const shapeY = (sp, shapeIdx) => {
+        if (shapeIdx === BIRD_SHAPE_INDEX && sp.wingS > 0) {
+          return sp.y - Math.sin(flapPhase - sp.wingS * 1.6) * Math.pow(sp.wingS, 1.2) * 0.30;
+        }
+        return sp.y;
+      };
       const { positions, colors, sizes, model, count } = figureGroup;
       for (let i = 0; i < count; i++) {
         const p = model[i];
+        const pa = p.shapes[from];
+        const pb = p.shapes[to];
+        const bx = pa.x + (pb.x - pa.x) * smoothBl;
+        const by = shapeY(pa, from) + (shapeY(pb, to) - shapeY(pa, from)) * smoothBl;
+        const bz = pa.z + (pb.z - pa.z) * smoothBl;
+        const colorT = pa.colorT + (pb.colorT - pa.colorT) * smoothBl;
+        const dim = pa.dim + (pb.dim - pa.dim) * smoothBl;
         const drift = Math.sin(effT * p.driftFreq + p.seed * 40) * p.driftAmp;
-        const lx = p.base.x + p.scatter.x * scatterT + drift;
-        const ly = p.base.y + p.scatter.y * scatterT + Math.cos(effT * p.driftFreq * 0.8 + p.seed * 25) * p.driftAmp;
-        const lz = p.base.z + p.scatter.z * scatterT;
+        const lx = bx + p.scatter.x * scatterT + drift;
+        const ly = by + p.scatter.y * scatterT + Math.cos(effT * p.driftFreq * 0.8 + p.seed * 25) * p.driftAmp;
+        const lz = bz + p.scatter.z * scatterT;
         const idx3 = i * 3;
         positions[idx3] = cx + (lx + lz * shearX) * figureScale;
         positions[idx3 + 1] = cy + (ly + lz * shearY) * figureScale;
@@ -1032,8 +1161,8 @@
         // Depth cues: nearer particles are bigger and brighter
         const zf = clamp(1 + lz * 0.9, 0.55, 1.45);
         const flicker = 0.75 + 0.25 * Math.sin(effT * 2.1 + p.seed * 30);
-        const c = lerpPalette(p.colorT);
-        const alpha = formation * p.dim * (0.6 + 0.4 * zf) * flicker;
+        const c = lerpPalette(colorT);
+        const alpha = formation * dim * (0.6 + 0.4 * zf) * flicker;
         colors[idx3] = c.r * alpha;
         colors[idx3 + 1] = c.g * alpha;
         colors[idx3 + 2] = c.b * alpha;
@@ -1298,6 +1427,7 @@
         expandActive,
         ghostActive,
         paletteIndex,
+        auraShape: auraShapeIndex,
         charging,
         chargeLevel,
         blackoutActive,
