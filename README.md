@@ -4,8 +4,9 @@ A fully static projection light show driven by a **gamepad** — one HTML file, 
 
 ## Stack
 
-- **Projector**: a single self-contained page (`public/index.html`) — vanilla JS, Three.js WebGPU/TSL particles, animejs for feel
-- **Input**: browser [Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), polled every animation frame
+- **Projector**: a single self-contained page (`public/index.html`) — vanilla JS, Three.js WebGPU/TSL, animejs for feel
+- **Particles**: instanced sprites (one draw call per effect) with per-instance position/color/size read by TSL nodes — WebGPU can only draw 1px point primitives, so fat particles must be instanced quads. Falls back to WebGL2 automatically; `?webgl=1` forces it
+- **Input**: browser [Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), polled every animation frame. Non-standard pads get an on-screen warning — button indices assume the `standard` mapping
 - **Audio**: [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API) analyser over `getUserMedia` — any input device (built-in mic, USB audio interface) works
 
 ## Quick start
@@ -75,4 +76,4 @@ npm install
 npm test
 ```
 
-Playwright loads the page over `file://` with a mock gamepad injected, then drives both sticks, the triggers, and every button to verify movement, dead zone, clamping, charge/nova, slow-mo, palettes, blackout, strobe, HUD, audio toggle, and each effect.
+Playwright loads the page over `file://` with a mock gamepad injected, then drives both sticks, the triggers, and every button to verify movement, dead zone, clamping, charge/nova, slow-mo, palettes, blackout, strobe, HUD, audio toggle, and each effect. A pixel-probe spec additionally reads the rendered canvas back and asserts real light hits the screen (and that blackout kills it) — state tests alone once let an invisible-particle regression through. Tests force the WebGL2 backend at reduced resolution; headless software WebGPU is flaky.

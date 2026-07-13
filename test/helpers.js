@@ -1,7 +1,12 @@
 const path = require('path');
 
+// All tests force the renderer's WebGL2 backend (?webgl=1): headless
+// Chromium's software WebGPU device is flaky — it can drop mid-run, which
+// freezes requestAnimationFrame and with it the gamepad polling loop.
 const PAGE_URL =
-  'file://' + path.resolve(__dirname, '..', 'public', 'index.html') + '?test=1';
+  'file://' + path.resolve(__dirname, '..', 'public', 'index.html') + '?test=1&webgl=1&lowres=1';
+
+const PAGE_URL_WEBGL = PAGE_URL;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -134,6 +139,7 @@ const BUTTONS = {
 
 module.exports = {
   PAGE_URL,
+  PAGE_URL_WEBGL,
   BUTTONS,
   sleep,
   installMockGamepad,
