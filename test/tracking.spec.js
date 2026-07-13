@@ -3,7 +3,6 @@ const {
   BUTTONS,
   openProjector,
   setAxes,
-  setRightStick,
   setButton,
   tapButton,
   getHook,
@@ -163,29 +162,6 @@ test('LB toggles the ghost aura', async ({ page }) => {
   expect(hook.ghostActive).toBe(false);
 });
 
-test('RB toggles the stand', async ({ page }) => {
-  await tapButton(page, BUTTONS.STAND);
-  let hook = await getHook(page);
-  expect(hook.standActive).toBe(true);
-
-  await tapButton(page, BUTTONS.STAND);
-  hook = await getHook(page);
-  expect(hook.standActive).toBe(false);
-});
-
-test('A fires a stand barrage while the stand is out', async ({ page }) => {
-  await tapButton(page, BUTTONS.STAND);
-  await tapButton(page, BUTTONS.BURST);
-
-  let hook = await getHook(page);
-  expect(hook.activeBurstCount).toBeGreaterThan(0);
-  expect(hook.activeBarrageCount).toBeGreaterThan(0);
-
-  await sleep(800);
-  hook = await getHook(page);
-  expect(hook.activeBarrageCount).toBe(0);
-});
-
 test('holding RT charges, releasing detonates a nova', async ({ page }) => {
   await setButton(page, BUTTONS.CHARGE, true);
   await sleep(600);
@@ -295,12 +271,3 @@ test('Select toggles audio-reactive mode', async ({ page }) => {
   expect(hook.audioEnabled).toBe(false);
 });
 
-test('right stick aims the stand', async ({ page }) => {
-  await setRightStick(page, 0, -1); // up
-  await sleep(500);
-  await setRightStick(page, 0, 0);
-
-  const hook = await getHook(page);
-  const diff = Math.abs(hook.standAngle - -Math.PI / 2);
-  expect(diff).toBeLessThan(0.2);
-});

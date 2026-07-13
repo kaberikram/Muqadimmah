@@ -64,6 +64,7 @@
       "three": "./vendor/three/three.core.js",
       "three/webgpu": "./vendor/three/three.webgpu.js",
       "three/tsl": "./vendor/three/three.tsl.js",
+      "three/addons/tsl/display/BloomNode.js": "./vendor/three/BloomNode.js",
       "animejs": "./vendor/animejs/index.js",
       "animejs/adapters/three": "./vendor/animejs/adapters/three/index.js"
     }
@@ -77,13 +78,12 @@
     <p>Plug in or pair a gamepad, then <strong style="color:#fff">press any button</strong> to start.</p>
     <div class="map">
       <div><b>L-stick</b> move spot</div>
-      <div><b>R-stick</b> aim stand · wind</div>
-      <div><b>A</b> burst / stand barrage</div>
+      <div><b>R-stick</b> wind</div>
+      <div><b>A</b> burst</div>
       <div><b>B</b> power aura</div>
       <div><b>X</b> (hold) expand</div>
       <div><b>Y</b> recenter</div>
       <div><b>LB</b> ghost aura</div>
-      <div><b>RB</b> summon stand</div>
       <div><b>LT</b> (hold) slow motion</div>
       <div><b>RT</b> (hold) charge → nova</div>
       <div><b>D-pad ↑↓</b> spot size</div>
@@ -98,8 +98,8 @@
   <canvas id="spotlight-canvas"></canvas>
 
   <div id="hud">
-    <div><b>L-stick</b> move · <b>R-stick</b> aim/wind · <b>A</b> burst · <b>B</b> aura · <b>X</b> expand · <b>Y</b> recenter</div>
-    <div><b>LB</b> ghost · <b>RB</b> stand · <b>LT</b> slow-mo · <b>RT</b> charge · <b>D-pad</b> size/palette</div>
+    <div><b>L-stick</b> move · <b>R-stick</b> wind · <b>A</b> burst · <b>B</b> aura · <b>X</b> expand · <b>Y</b> recenter</div>
+    <div><b>LB</b> ghost · <b>LT</b> slow-mo · <b>RT</b> charge · <b>D-pad</b> size/palette</div>
     <div><b>L3</b> blackout · <b>R3</b> strobe · <b>Select</b> audio · <b>Start</b> hide this</div>
     <div id="hud-status"></div>
   </div>
@@ -110,9 +110,11 @@
 
     import * as THREE from 'three/webgpu';
     import {
-      Fn, uniform, time, vec3, sin,
+      Fn, uniform, time, vec3, sin, exp, float, atan,
       instancedBufferAttribute, uv, smoothstep, mix,
+      pass, screenUV,
     } from 'three/tsl';
+    import { bloom } from 'three/addons/tsl/display/BloomNode.js';
     import { animate } from 'animejs';
     import 'animejs/adapters/three';
 
@@ -137,12 +139,12 @@
     const FOLLOW_RATE = 28;       // spotlight easing toward the pointer
 
     // Standard gamepad mapping (Xbox layout) — every button does something
-    const BTN_BURST = 0;      // A       tap: burst (+ stand barrage while stand is out)
+    const BTN_BURST = 0;      // A       tap: burst
     const BTN_AURA = 1;       // B       tap: warm power-aura figure
     const BTN_EXPAND = 2;     // X       hold: spotlight grows
     const BTN_RECENTER = 3;   // Y       tap: snap to center
     const BTN_GHOST = 4;      // LB      tap: spectral ghost aura + afterimages
-    const BTN_STAND = 5;      // RB      tap: summon the stand
+    // index 5 (RB) is currently unbound
     const BTN_SLOWMO = 6;     // LT      analog hold: time dilation
     const BTN_CHARGE = 7;     // RT      analog hold: charge in, release: nova
     const BTN_AUDIO = 8;      // Select  tap: audio-reactive mode (mic / interface)
@@ -160,10 +162,6 @@
     const BURST_PARTICLE_COUNT = 40;
     const BURST_POOL_SIZE = 10; // max concurrent bursts with visible ring/flash geometry
 
-    const BARRAGE_POOL_SIZE = 4;
-    const BARRAGE_PARTICLE_COUNT = 26;
-    const BARRAGE_DURATION_MS = 560;
-
     const TRIGGER_THRESHOLD = 0.06;   // analog triggers register above this
     const CHARGE_RATE = 0.9;          // charge/sec at full trigger pull
     const CHARGE_MIN_NOVA = 0.12;     // minimum charge that still detonates
@@ -177,38 +175,38 @@
     // ---- Palettes (D-pad ←→ cycles; t: 0 = core, 1 = rim) -----------------
     const PALETTES = [
       { name: 'SOLAR', stops: [
-        { t: 0.0, r: 255, g: 240, b: 210 },
-        { t: 0.5, r: 255, g: 210, b: 160 },
-        { t: 1.0, r: 205, g: 185, b: 255 },
+        { t: 0.0, r: 255, g: 244, b: 222 },
+        { t: 0.5, r: 255, g: 205, b: 150 },
+        { t: 0.8, r: 255, g: 150, b: 110 },
+        { t: 1.0, r: 150, g: 125, b: 255 },
       ] },
       { name: 'SPECTRE', stops: [
-        { t: 0.0, r: 225, g: 250, b: 255 },
-        { t: 0.5, r: 120, g: 220, b: 255 },
-        { t: 1.0, r: 130, g: 110, b: 255 },
+        { t: 0.0, r: 230, g: 252, b: 255 },
+        { t: 0.5, r: 110, g: 215, b: 255 },
+        { t: 0.8, r: 120, g: 140, b: 255 },
+        { t: 1.0, r: 160, g: 90, b: 255 },
       ] },
       { name: 'VENOM', stops: [
-        { t: 0.0, r: 235, g: 255, b: 220 },
-        { t: 0.5, r: 130, g: 255, b: 140 },
-        { t: 1.0, r: 40, g: 190, b: 160 },
+        { t: 0.0, r: 240, g: 255, b: 225 },
+        { t: 0.5, r: 120, g: 255, b: 140 },
+        { t: 0.8, r: 45, g: 220, b: 180 },
+        { t: 1.0, r: 30, g: 140, b: 210 },
       ] },
       { name: 'CRIMSON', stops: [
-        { t: 0.0, r: 255, g: 235, b: 225 },
-        { t: 0.5, r: 255, g: 110, b: 95 },
-        { t: 1.0, r: 190, g: 60, b: 160 },
+        { t: 0.0, r: 255, g: 238, b: 228 },
+        { t: 0.5, r: 255, g: 105, b: 90 },
+        { t: 0.8, r: 235, g: 65, b: 130 },
+        { t: 1.0, r: 150, g: 55, b: 220 },
       ] },
       { name: 'MONO', stops: [
         { t: 0.0, r: 255, g: 255, b: 255 },
-        { t: 0.5, r: 200, g: 200, b: 200 },
-        { t: 1.0, r: 120, g: 120, b: 130 },
+        { t: 0.5, r: 205, g: 205, b: 210 },
+        { t: 0.8, r: 160, g: 160, b: 175 },
+        { t: 1.0, r: 105, g: 105, b: 125 },
       ] },
     ];
-    // Fixed palettes: the ghost is always spectral, the stand always violet.
+    // Fixed palette: the ghost is always spectral.
     const GHOST_STOPS = PALETTES[1].stops;
-    const STAND_STOPS = [
-      { t: 0.0, r: 255, g: 235, b: 255 },
-      { t: 0.5, r: 235, g: 120, b: 255 },
-      { t: 1.0, r: 140, g: 90, b: 255 },
-    ];
 
     function lerpStops(stops, t) {
       t = clamp(t, 0, 1);
@@ -266,14 +264,12 @@
     let expandActive = false;
     let auraActive = false;
     let ghostActive = false;
-    let standActive = false;
     let strobeActive = false;
     let blackoutActive = false;
     let hudVisible = false;
     let radiusScale = 1;
     let radiusBase = RADIUS_BASE_DEFAULT;
     let bursts = [];
-    let barrages = [];
     let auraPhase = 0;
 
     // Scaled effect clock: LT dilates this, control input stays real-time.
@@ -286,12 +282,9 @@
     let chargeLevel = 0;
     let chargeActivity = 0; // smoothed trigger pull, drives inflow particle alpha
 
-    // Stand aim (right stick) + wind
-    let standAngle = -2.2;  // default: hovers up-left of the spot
+    // Wind (right stick)
     let windX = 0;
     let windY = 0;
-    let standX = 0;
-    let standY = 0;
 
     // Ghost afterimage lag positions
     let echoAX = null, echoAY = null;
@@ -304,14 +297,6 @@
     function smoothFollow(current, target, rate, dt) {
       const alpha = 1 - Math.exp(-rate * dt);
       return current + (target - current) * alpha;
-    }
-
-    function angleLerp(current, target, rate, dt) {
-      let diff = target - current;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      const alpha = 1 - Math.exp(-rate * dt);
-      return current + diff * alpha;
     }
 
     function resizeCanvas() {
@@ -375,17 +360,14 @@
         toast('NON-STANDARD PAD — MAPPING MAY DIFFER');
       }
 
-      // Right stick — aim the stand, and lean embers/wisps into the wind.
+      // Right stick — lean embers/wisps into the wind.
       // Only trust axes 2/3 on standard mapping: elsewhere they are often
-      // analog triggers resting at -1, which would slam the wind/stand aim.
+      // analog triggers resting at -1, which would slam the wind.
       let rstick = { x: 0, y: 0, mag: 0 };
       if (isStandardPad && gp.axes.length >= 4) {
         const rx = gp.axes[2] || 0;
         const ry = gp.axes[3] || 0;
         rstick = applyStickCurve(rx, ry, 0.18);
-        if (rstick.mag > 0) {
-          standAngle = angleLerp(standAngle, Math.atan2(ry, rx), 10, dt);
-        }
       }
       const w = window.innerWidth;
       const h = window.innerHeight;
@@ -401,7 +383,6 @@
         const cx = currentX ?? pointerX * w;
         const cy = currentY ?? pointerY * h;
         spawnBurst(cx, cy, effMs, { power: 1 });
-        if (standActive) spawnBarrage(standX, standY, cx, cy, effMs);
       }
       expandActive = pressed(BTN_EXPAND);
       if (edge(BTN_AURA)) {
@@ -416,11 +397,6 @@
         ghostActive = !ghostActive;
         setFormationTarget(ghostFormation, ghostActive);
         toast(ghostActive ? 'GHOST' : 'GHOST OFF');
-      }
-      if (edge(BTN_STAND)) {
-        standActive = !standActive;
-        setFormationTarget(standFormation, standActive);
-        toast(standActive ? 'STAND' : 'STAND OFF');
       }
       if (edge(BTN_AUDIO)) toggleAudio();
       if (edge(BTN_HUD)) {
@@ -577,6 +553,8 @@
           particles.push({
             angle,
             speed,
+            zv: (Math.random() - 0.5) * 260,     // out-of-plane kick
+            drag: 2.2 + Math.random() * 1.5,
             size: (2 + Math.random() * 4) * (0.8 + 0.4 * power),
             life: 0.6 + Math.random() * 0.4,
           });
@@ -586,25 +564,8 @@
       if (shake) shakeCamera(power);
     }
 
-    function spawnBarrage(ox, oy, tx, ty, tMs) {
-      const baseAngle = Math.atan2(ty - oy, tx - ox);
-      const particles = [];
-      for (let i = 0; i < BARRAGE_PARTICLE_COUNT; i++) {
-        particles.push({
-          angle: baseAngle + (Math.random() - 0.5) * 0.55,
-          speed: 900 + Math.random() * 800,
-          size: 1.5 + Math.random() * 2.5,
-          life: 0.35 + Math.random() * 0.35,
-          delay: Math.random() * 160, // staggered rapid-fire jabs
-        });
-      }
-      barrages.push({ x: ox, y: oy, startTime: tMs, particles });
-      shakeCamera(0.5);
-    }
-
     function cullEffects(tMs) {
       bursts = bursts.filter((b) => tMs - b.startTime < BURST_DURATION_MS);
-      barrages = barrages.filter((b) => tMs - b.startTime < BARRAGE_DURATION_MS);
     }
 
     function baseRadius(w, h) {
@@ -615,23 +576,21 @@
     let renderer = null;
     let scene = null;
     let camera = null;
+    let post = null;
     let spotlightGroup = null;
     let echoGroupA = null;
     let echoGroupB = null;
     let figureGroup = null;
     let emberGroup = null;
     let ghostGroup = null;
-    let standGroup = null;
     let chargeGroup = null;
     let burstGroup = null;
-    let barrageGroup = null;
     let flashMesh = null;
     let blackMesh = null;
     let discMesh = null;
     let haloMesh = null;
     const auraIntensityUniform = uniform(0);
     const ghostIntensityUniform = uniform(0);
-    const standIntensityUniform = uniform(0);
     const discCoreUniform = uniform(new THREE.Color(1, 1, 1));
     const discMidUniform = uniform(new THREE.Color(1, 1, 1));
     const discRimUniform = uniform(new THREE.Color(1, 1, 1));
@@ -659,10 +618,48 @@
       return mesh;
     }
 
+    // Expanding shockwave evaluated on a quad in TSL: a gaussian radial band
+    // with a hot leading edge, chromatic r/b split, and angular breakup —
+    // sines/exp only, so the software-GL fallback compiles it instantly.
+    function makeShockwave() {
+      const progress = uniform(0);
+      const power = uniform(1);
+      const cCore = uniform(new THREE.Color(1, 1, 1));
+      const cRim = uniform(new THREE.Color(1, 0.7, 0.5));
+      const material = new THREE.MeshBasicNodeMaterial({
+        transparent: true, depthWrite: false, depthTest: false,
+        blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      });
+      material.colorNode = Fn(() => {
+        const p = uv().sub(0.5).mul(2.0);
+        const d = p.length();
+        const R = progress.mul(0.85).add(0.06);
+        const w = float(0.035).add(progress.mul(0.09)); // wave thickens as it dies
+        const band = (radius) => exp(d.sub(radius).div(w).pow2().negate());
+        const ring = band(R);
+        const rr = band(R.mul(1.02));
+        const bb = band(R.mul(0.98));
+        const lead = smoothstep(0.0, w, R.sub(d)).oneMinus().mul(ring).mul(1.8);
+        const ang = atan(p.y, p.x);
+        const breakup = sin(ang.mul(9.0).add(time.mul(3.0)))
+          .mul(sin(ang.mul(23.0).sub(time.mul(5.0)))).mul(0.35).add(0.85);
+        const fade = progress.oneMinus().pow(1.6).mul(power);
+        return vec3(rr, ring, bb).mul(mix(cRim, cCore, ring))
+          .add(vec3(lead)).mul(breakup).mul(fade);
+      })();
+      material.opacityNode = float(1.0);
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      return { mesh, progress, power, cCore, cRim };
+    }
+
     // Soft round glow evaluated on the sprite quad in TSL — no texture involved.
+    // With real bloom on the WebGPU path the falloff is tightened, since the
+    // pass supplies the halo; the WebGL fallback keeps the wider fake glow.
     function glowOpacityNode() {
       const d = uv().sub(0.5).length().mul(2.0);
-      return smoothstep(1.0, 0.0, d).pow(1.8);
+      return smoothstep(1.0, 0.0, d).pow(forceWebGL ? 1.8 : 2.2);
     }
 
     // Fat particles on WebGPU: point primitives are always 1px there, so each
@@ -686,17 +683,19 @@
       material.blending = THREE.AdditiveBlending;
 
       const aPos = instancedBufferAttribute(posAttr);
-      // Layered incommensurate sines: organic-enough displacement that
-      // compiles instantly everywhere (fractal noise stalls software GL).
+      // Pseudo-curl from products of rotated sine fields: swirling, organic
+      // displacement built from sines only, so it still compiles instantly
+      // everywhere (fractal noise stalls software GL). The per-instance seed
+      // decorrelates the phases so the cloud never moves as one sheet.
+      const aSeed = instancedBufferAttribute(new THREE.InstancedBufferAttribute(seeds, 1));
       material.positionNode = shimmer
         ? Fn(() => {
-            const p = aPos.mul(0.045);
-            const t = time.mul(shimmer.speed * 6.0);
-            const n = vec3(
-              sin(p.y.add(t)).add(sin(p.x.mul(1.7).add(t.mul(1.3)))),
-              sin(p.x.add(t.mul(0.9))).add(sin(p.y.mul(2.1).add(t.mul(1.1)))),
-              0,
-            ).mul(0.5);
+            const p = aPos.mul(0.02);
+            const t = time.mul(shimmer.speed * 6.0).add(aSeed.mul(6.283));
+            const n1 = sin(p.y.mul(3.1).add(t)).mul(sin(p.x.mul(2.3).sub(t.mul(0.7))));
+            const n2 = sin(p.x.mul(2.9).sub(t.mul(1.1))).mul(sin(p.y.mul(1.7).add(t.mul(0.6))));
+            const n3 = sin(p.x.add(p.y).mul(1.3).add(t.mul(0.8)));
+            const n = vec3(n1, n2.negate(), n3.mul(0.6));
             return aPos.add(n.mul(shimmer.intensity.mul(shimmer.amp)));
           })()
         : aPos;
@@ -737,74 +736,57 @@
       return { x: x / len, y: y / len, z: z / len };
     }
 
-    // Abstract, minimal humanoid silhouette in a local unit space:
-    // y negative = up (head), y positive = down (feet). Scaled to pixels at render time.
-    function sampleBodyPart(name) {
-      switch (name) {
-        case 'head': {
-          const v = randomOnSphere();
-          return { x: v.x * 0.11, y: -0.78 + v.y * 0.11, z: v.z * 0.11, colorT: 0.05 + Math.random() * 0.15 };
-        }
-        case 'torso': {
-          const t = Math.random();
-          const y = -0.62 + t * 0.42;
-          const width = 0.10 + t * 0.06;
-          const a = Math.random() * Math.PI * 2;
-          return { x: Math.cos(a) * width, y, z: Math.sin(a) * width * 0.55, colorT: 0.1 + Math.random() * 0.25 };
-        }
-        case 'armL':
-        case 'armR': {
-          const side = name === 'armL' ? -1 : 1;
-          const t = Math.random();
-          const shoulderY = -0.55, fistY = -0.16;
-          const shoulderX = side * 0.16, fistX = side * 0.30;
-          const y = shoulderY + (fistY - shoulderY) * t;
-          const bend = Math.sin(t * Math.PI) * 0.05;
-          const x = shoulderX + (fistX - shoulderX) * t + side * bend;
-          const r = 0.035 * (1 - t * 0.3);
-          const a = Math.random() * Math.PI * 2;
-          return { x: x + Math.cos(a) * r, y, z: Math.sin(a) * r, colorT: 0.35 + Math.random() * 0.3 };
-        }
-        case 'legL':
-        case 'legR': {
-          const side = name === 'legL' ? -1 : 1;
-          const t = Math.random();
-          const hipY = -0.20, footY = 0.35;
-          const hipX = side * 0.06, footX = side * 0.14;
-          const y = hipY + (footY - hipY) * t;
-          const x = hipX + (footX - hipX) * t;
-          const r = 0.045 * (1 - t * 0.2);
-          const a = Math.random() * Math.PI * 2;
-          return { x: x + Math.cos(a) * r, y, z: Math.sin(a) * r, colorT: 0.4 + Math.random() * 0.35 };
-        }
-        default:
-          return { x: 0, y: 0, z: 0, colorT: 0 };
-      }
+    // Vague humanoid presence: instead of sampling anatomical limbs, sample a
+    // smooth vertical density envelope (head bulge, shoulder mass, hip mass,
+    // tapering legs) so the figure only *suggests* a person. y negative = up
+    // (head), y positive = down (feet). Scaled to pixels at render time.
+    function silhouetteWidth(y) {
+      const g = (c, s) => Math.exp(-((y - c) ** 2) / (s * s));
+      const head = 0.115 * g(-0.78, 0.085);
+      const neckPinch = 1 - 0.45 * g(-0.645, 0.045);
+      const torso = 0.185 * g(-0.28, 0.30);
+      const hips = 0.150 * g(0.02, 0.16);
+      const legs = 0.120 * Math.max(0, 1 - Math.abs((y - 0.22) / 0.30));
+      return Math.max(head, Math.max(torso, hips, legs) * neckPinch);
+    }
+
+    function gaussRandom() {
+      let u = 0, v = 0;
+      while (!u) u = Math.random();
+      while (!v) v = Math.random();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
     }
 
     function buildFigureModel(count) {
-      const parts = [
-        { name: 'head', share: 0.10 },
-        { name: 'torso', share: 0.30 },
-        { name: 'armL', share: 0.12 },
-        { name: 'armR', share: 0.12 },
-        { name: 'legL', share: 0.18 },
-        { name: 'legR', share: 0.18 },
-      ];
       const model = [];
-      for (const part of parts) {
-        const n = Math.round(count * part.share);
-        for (let i = 0; i < n; i++) {
-          const base = sampleBodyPart(part.name);
-          const scatter = randomOnSphere();
-          const scatterMag = 0.9 + Math.random() * 1.6;
-          model.push({
-            base,
-            scatter: { x: scatter.x * scatterMag, y: scatter.y * scatterMag, z: scatter.z * scatterMag },
-            size: 2 + Math.random() * 2.5,
-            colorT: base.colorT,
-          });
-        }
+      for (let i = 0; i < count; i++) {
+        // Rejection-sample height so particle density follows the envelope
+        let y;
+        do { y = -0.95 + Math.random() * 1.40; }
+        while (Math.random() > 0.35 + silhouetteWidth(y) * 3.2);
+        const w = silhouetteWidth(y);
+        // A fraction of particles bleed off the form as loose haze
+        const stray = Math.random() < 0.18;
+        const r = stray ? w * (1.1 + Math.random() * 1.6) : w * Math.pow(Math.random(), 0.55);
+        const side = Math.random() < 0.5 ? -1 : 1;
+        // Faint lateral drift around arm height — a hint, not a limb
+        const armHint = (y > -0.60 && y < -0.15 && Math.random() < 0.14)
+          ? side * (0.10 + Math.random() * 0.16) * Math.sin(((y + 0.60) / 0.45) * Math.PI)
+          : 0;
+        const x = side * r * Math.abs(gaussRandom()) * 0.9 + armHint;
+        const z = gaussRandom() * w * 0.8;
+        const scatter = randomOnSphere();
+        const scatterMag = 0.9 + Math.random() * 1.6;
+        model.push({
+          base: { x, y, z },
+          scatter: { x: scatter.x * scatterMag, y: scatter.y * scatterMag, z: scatter.z * scatterMag },
+          size: (stray ? 1.2 : 2) + Math.random() * 2.8,
+          colorT: Math.min(1, Math.abs(x) / (w + 1e-4) * 0.5 + (y + 0.95) / 1.4 * 0.35 + (stray ? 0.3 : 0)),
+          dim: stray ? 0.35 + Math.random() * 0.3 : 0.8 + Math.random() * 0.2,
+          seed: Math.random(),
+          driftAmp: 0.01 + Math.random() * 0.03,
+          driftFreq: 0.4 + Math.random() * 1.2,
+        });
       }
       return model;
     }
@@ -843,6 +825,8 @@
       return Array.from({ length: count }, () => ({
         r: Math.pow(Math.random(), exponent),
         a: Math.random() * Math.PI * 2,
+        z: gaussRandom() * 0.35,          // grain floats in a shallow volume
+        jitter: 0.7 + Math.random() * 0.6,
       }));
     }
 
@@ -874,7 +858,7 @@
       // Spotlight body — a real gradient disc + wide halo so the spot always
       // reads as a beam of light, with the particle grain layered on top.
       discMesh = makeGradientDisc(1.1, 0.95);
-      haloMesh = makeGradientDisc(2.4, 0.28);
+      haloMesh = makeGradientDisc(2.4, forceWebGL ? 0.28 : 0.18);
       scene.add(haloMesh, discMesh);
 
       // Ghost afterimages — lagging spectral copies of the spotlight disc
@@ -900,8 +884,8 @@
       chargeGroup.points.visible = false;
       scene.add(chargeGroup.points);
 
-      // Aura figure (abstract humanoid), gets the shimmering GPU displacement
-      const FIGURE_COUNT = 550;
+      // Aura figure (vague humanoid presence), gets the shimmering GPU displacement
+      const FIGURE_COUNT = 1600;
       figureGroup = makeParticleGroup(FIGURE_COUNT, {
         shimmer: { intensity: auraIntensityUniform, amp: 9.0, speed: 0.4 },
       });
@@ -927,40 +911,17 @@
       ghostGroup.points.visible = false;
       scene.add(ghostGroup.points);
 
-      // The stand — a second violet figure hovering beside the spot
-      const STAND_COUNT = 480;
-      standGroup = makeParticleGroup(STAND_COUNT, {
-        shimmer: { intensity: standIntensityUniform, amp: 6.0, speed: 0.7 },
-      });
-      standGroup.model = buildFigureModel(STAND_COUNT);
-      standGroup.points.visible = false;
-      scene.add(standGroup.points);
-
-      // Barrage streaks (stand rapid-fire jabs), pooled
-      barrageGroup = makeParticleGroup(BARRAGE_POOL_SIZE * BARRAGE_PARTICLE_COUNT);
-      scene.add(barrageGroup.points);
-
       // Burst sparks (shared pool across all concurrently active bursts)
       const BURST_TOTAL = BURST_POOL_SIZE * BURST_PARTICLE_COUNT;
       burstGroup = makeParticleGroup(BURST_TOTAL);
       scene.add(burstGroup.points);
 
-      // Burst rings — pooled meshes, one pair per concurrent burst slot
-      burstGroup.rings = [];
+      // Burst shockwaves — pooled TSL quads, one per concurrent burst slot
+      burstGroup.waves = [];
       for (let i = 0; i < BURST_POOL_SIZE; i++) {
-        const outerMat = new THREE.MeshBasicNodeMaterial({
-          color: 0xffffff, transparent: true, opacity: 0,
-          blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, side: THREE.DoubleSide,
-        });
-        const innerMat = new THREE.MeshBasicNodeMaterial({
-          color: 0xffd8b0, transparent: true, opacity: 0,
-          blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, side: THREE.DoubleSide,
-        });
-        const outer = new THREE.Mesh(new THREE.RingGeometry(0.94, 1, 64), outerMat);
-        const inner = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, 64), innerMat);
-        outer.visible = inner.visible = false;
-        scene.add(outer, inner);
-        burstGroup.rings.push({ outer, inner });
+        const wave = makeShockwave();
+        scene.add(wave.mesh);
+        burstGroup.waves.push(wave);
       }
 
       // Fullscreen additive flash on burst impact / strobe
@@ -984,24 +945,43 @@
       blackMesh.renderOrder = 10;
       scene.add(blackMesh);
 
+      // Postprocessing (WebGPU only): real bloom + subtle chromatic
+      // aberration + vignette. The ?webgl=1 CI path keeps the plain render —
+      // software GL can't afford the extra passes.
+      if (!forceWebGL) {
+        post = new THREE.PostProcessing(renderer);
+        const scenePass = pass(scene, camera);
+        const sceneTex = scenePass.getTextureNode();
+        const bloomPass = bloom(scenePass, 0.85, 0.5, 0.0); // threshold 0: everything glows on black
+        const off = screenUV.sub(0.5).mul(0.0022);
+        const ca = vec3(
+          sceneTex.sample(screenUV.add(off)).r,
+          sceneTex.sample(screenUV).g,
+          sceneTex.sample(screenUV.sub(off)).b,
+        );
+        const vig = screenUV.sub(0.5).length().mul(1.35).pow(2.0).oneMinus().clamp(0.3, 1.0);
+        post.outputNode = ca.add(bloomPass).mul(vig);
+      }
+
       resizeCanvas();
     }
 
     function updateSpotlight(cx, cy, radius, sizeMul, brightMul) {
       const { positions, colors, sizes, model, count } = spotlightGroup;
       for (let i = 0; i < count; i++) {
-        const { r, a } = model[i];
+        const { r, a, z, jitter } = model[i];
         const dist = r * radius;
         const idx3 = i * 3;
         positions[idx3] = cx + Math.cos(a) * dist;
         positions[idx3 + 1] = cy + Math.sin(a) * dist;
-        positions[idx3 + 2] = 0;
-        const falloff = (1 - r) * brightMul;
+        positions[idx3 + 2] = z * radius;
+        const zf = clamp(1 + z * 0.8, 0.6, 1.4);
+        const falloff = (1 - r) * brightMul * (0.7 + 0.3 * zf);
         const c = lerpPalette(r);
         colors[idx3] = c.r * falloff;
         colors[idx3 + 1] = c.g * falloff;
         colors[idx3 + 2] = c.b * falloff;
-        sizes[i] = (1.5 + (1 - r) * 5) * sizeMul;
+        sizes[i] = (1.5 + (1 - r) * 5) * sizeMul * jitter * zf;
       }
       commitGroup(spotlightGroup);
     }
@@ -1034,22 +1014,30 @@
       if (!visible) return;
 
       const scatterT = 1 - formation;
+      // Slight view shear from z as the spot moves — parallax under the
+      // orthographic camera, so the cloud reads as a volume, not a cutout.
+      const shearX = (pointerX - 0.5) * 0.35;
+      const shearY = (pointerY - 0.5) * 0.25;
       const { positions, colors, sizes, model, count } = figureGroup;
       for (let i = 0; i < count; i++) {
         const p = model[i];
-        const lx = p.base.x + p.scatter.x * scatterT;
-        const ly = p.base.y + p.scatter.y * scatterT;
+        const drift = Math.sin(effT * p.driftFreq + p.seed * 40) * p.driftAmp;
+        const lx = p.base.x + p.scatter.x * scatterT + drift;
+        const ly = p.base.y + p.scatter.y * scatterT + Math.cos(effT * p.driftFreq * 0.8 + p.seed * 25) * p.driftAmp;
         const lz = p.base.z + p.scatter.z * scatterT;
         const idx3 = i * 3;
-        positions[idx3] = cx + lx * figureScale;
-        positions[idx3 + 1] = cy + ly * figureScale;
+        positions[idx3] = cx + (lx + lz * shearX) * figureScale;
+        positions[idx3 + 1] = cy + (ly + lz * shearY) * figureScale;
         positions[idx3 + 2] = lz * figureScale;
+        // Depth cues: nearer particles are bigger and brighter
+        const zf = clamp(1 + lz * 0.9, 0.55, 1.45);
+        const flicker = 0.75 + 0.25 * Math.sin(effT * 2.1 + p.seed * 30);
         const c = lerpPalette(p.colorT);
-        const alpha = formation;
+        const alpha = formation * p.dim * (0.6 + 0.4 * zf) * flicker;
         colors[idx3] = c.r * alpha;
         colors[idx3 + 1] = c.g * alpha;
         colors[idx3 + 2] = c.b * alpha;
-        sizes[i] = p.size;
+        sizes[i] = p.size * zf;
       }
       commitGroup(figureGroup);
     }
@@ -1072,12 +1060,13 @@
         positions[idx3] = ex;
         positions[idx3 + 1] = ey;
         positions[idx3 + 2] = ez;
-        const fade = Math.sin(riseT * Math.PI) * formation;
+        const ezf = clamp(1 + ez * 0.004, 0.6, 1.4);
+        const fade = Math.sin(riseT * Math.PI) * formation * (0.6 + 0.4 * ezf);
         const c = lerpPalette(0.35 + riseT * 0.65);
         colors[idx3] = c.r * fade;
         colors[idx3 + 1] = c.g * fade;
         colors[idx3 + 2] = c.b * fade;
-        sizes[i] = p.size;
+        sizes[i] = p.size * ezf;
       }
       commitGroup(emberGroup);
     }
@@ -1095,11 +1084,13 @@
         const orbit = radius * p.orbit * breathe;
         const riseT = (effT * p.riseSpeed + p.seed) % 1;
         const idx3 = i * 3;
+        const gz = Math.sin(angle + p.seed * 9) * orbit * 0.5;
         positions[idx3] = cx + Math.cos(angle) * orbit + windX * (0.5 + riseT);
         positions[idx3 + 1] = cy + Math.sin(angle) * orbit * 0.8 - riseT * radius * 1.6 + windY * (0.5 + riseT);
-        positions[idx3 + 2] = 0;
+        positions[idx3 + 2] = gz;
+        const gzf = clamp(1 + gz * 0.004, 0.6, 1.4);
         const flicker = 0.55 + 0.45 * Math.sin(effT * 3 * p.wobble + p.seed * 20);
-        const fade = Math.sin(riseT * Math.PI) * formation * flicker;
+        const fade = Math.sin(riseT * Math.PI) * formation * flicker * (0.6 + 0.4 * gzf);
         const c = lerpStops(GHOST_STOPS, p.colorT);
         colors[idx3] = c.r * fade;
         colors[idx3 + 1] = c.g * fade;
@@ -1107,37 +1098,6 @@
         sizes[i] = p.size;
       }
       commitGroup(ghostGroup);
-    }
-
-    function updateStand(cx, cy, w, h, formation) {
-      const visible = formation > 0.001;
-      standGroup.points.visible = visible;
-      const minDim = Math.min(w, h);
-      const orbit = minDim * 0.34;
-      standX = cx + Math.cos(standAngle) * orbit;
-      standY = cy + Math.sin(standAngle) * orbit + Math.sin(effT * 1.7) * minDim * 0.012;
-      if (!visible) return;
-
-      const figureScale = baseRadius(w, h) * 1.55;
-      const scatterT = 1 - formation;
-      const { positions, colors, sizes, model, count } = standGroup;
-      for (let i = 0; i < count; i++) {
-        const p = model[i];
-        const lx = p.base.x + p.scatter.x * scatterT;
-        const ly = p.base.y + p.scatter.y * scatterT;
-        const lz = p.base.z + p.scatter.z * scatterT;
-        const idx3 = i * 3;
-        positions[idx3] = standX + lx * figureScale;
-        positions[idx3 + 1] = standY + ly * figureScale;
-        positions[idx3 + 2] = lz * figureScale;
-        const c = lerpStops(STAND_STOPS, p.colorT);
-        const alpha = formation * (0.8 + 0.2 * Math.sin(effT * 2.3 + p.colorT * 12));
-        colors[idx3] = c.r * alpha;
-        colors[idx3 + 1] = c.g * alpha;
-        colors[idx3 + 2] = c.b * alpha;
-        sizes[i] = p.size * 0.9;
-      }
-      commitGroup(standGroup);
     }
 
     function updateCharge(cx, cy, radius) {
@@ -1176,27 +1136,25 @@
         const burst = bursts[b];
         const elapsed = tMs - burst.startTime;
         const t = elapsed / BURST_DURATION_MS;
-        const ring = burstGroup.rings[b];
+        const wave = burstGroup.waves[b];
         const power = burst.power;
 
         if (t >= 1) {
-          ring.outer.visible = ring.inner.visible = false;
+          wave.mesh.visible = false;
         } else {
           const flash = Math.max(0, 1 - elapsed / 180);
           maxFlash = Math.max(maxFlash, flash * 0.18 * Math.min(power, 1.6));
 
-          const ringR = (40 + elapsed * 0.55) * (0.65 + 0.55 * Math.min(power, 2.2));
-          const ringAlpha = Math.max(0, (1 - t * 1.1) * 0.7);
-          ring.outer.visible = true;
-          ring.outer.position.set(burst.x, burst.y, -10);
-          ring.outer.scale.setScalar(ringR);
-          ring.outer.material.opacity = ringAlpha;
-
-          const ring2Alpha = Math.max(0, (1 - t * 1.3) * 0.5);
-          ring.inner.visible = true;
-          ring.inner.position.set(burst.x, burst.y, -10);
-          ring.inner.scale.setScalar(ringR * 0.65);
-          ring.inner.material.opacity = ring2Alpha;
+          const waveR = (60 + elapsed * 0.65) * (0.65 + 0.55 * Math.min(power, 2.2));
+          wave.mesh.visible = true;
+          wave.mesh.position.set(burst.x, burst.y, -10);
+          wave.mesh.scale.setScalar(waveR);
+          wave.progress.value = t;
+          wave.power.value = Math.min(power, 2.5) * 0.8;
+          const core = lerpPalette(0.1);
+          const rim = lerpPalette(0.9);
+          wave.cCore.value.setRGB(core.r, core.g, core.b);
+          wave.cRim.value.setRGB(rim.r, rim.g, rim.b);
         }
 
         for (const p of burst.particles) {
@@ -1207,25 +1165,28 @@
             colors[idx3] = colors[idx3 + 1] = colors[idx3 + 2] = 0;
             sizes[slot] = 0;
           } else {
-            const dist = p.speed * (elapsed / 1000);
+            const e = elapsed / 1000;
+            // Drag-decelerated flight: explosive punch, then it hangs
+            const dist = p.speed * (1 - Math.exp(-p.drag * e)) / p.drag * 1.2;
+            const z = p.zv * e;
             positions[idx3] = burst.x + Math.cos(p.angle) * dist;
             positions[idx3 + 1] = burst.y + Math.sin(p.angle) * dist;
-            positions[idx3 + 2] = 0;
-            const pAlpha = Math.max(0, 1 - lifeT);
+            positions[idx3 + 2] = z;
+            const zf = clamp(1 + z * 0.004, 0.5, 1.6);
+            const pAlpha = Math.max(0, 1 - lifeT) * (0.6 + 0.4 * zf);
             const c = lerpPalette(0.15 + lifeT * 0.6);
             colors[idx3] = Math.min(1, c.r + 0.3) * pAlpha;
             colors[idx3 + 1] = c.g * pAlpha;
             colors[idx3 + 2] = c.b * pAlpha;
-            sizes[slot] = p.size * 2;
+            sizes[slot] = p.size * 2 * zf;
           }
           slot++;
         }
       }
 
-      // hide unused rings/particle slots
+      // hide unused shockwaves/particle slots
       for (let b = bursts.length; b < BURST_POOL_SIZE; b++) {
-        burstGroup.rings[b].outer.visible = false;
-        burstGroup.rings[b].inner.visible = false;
+        burstGroup.waves[b].mesh.visible = false;
       }
       for (; slot < count; slot++) {
         const idx3 = slot * 3;
@@ -1237,49 +1198,9 @@
       return maxFlash;
     }
 
-    function updateBarrages(tMs) {
-      const { positions, colors, sizes, count } = barrageGroup;
-      let slot = 0;
-
-      for (let b = 0; b < barrages.length && b < BARRAGE_POOL_SIZE; b++) {
-        const barrage = barrages[b];
-        for (const p of barrage.particles) {
-          if (slot >= count) break;
-          const idx3 = slot * 3;
-          const elapsed = tMs - barrage.startTime - p.delay;
-          const lifeT = elapsed / (BARRAGE_DURATION_MS * p.life);
-          if (elapsed < 0 || lifeT >= 1) {
-            colors[idx3] = colors[idx3 + 1] = colors[idx3 + 2] = 0;
-            sizes[slot] = 0;
-          } else {
-            const dist = p.speed * (elapsed / 1000);
-            positions[idx3] = barrage.x + Math.cos(p.angle) * dist;
-            positions[idx3 + 1] = barrage.y + Math.sin(p.angle) * dist;
-            positions[idx3 + 2] = 0;
-            const pAlpha = Math.max(0, 1 - lifeT);
-            const c = lerpStops(STAND_STOPS, lifeT * 0.8);
-            colors[idx3] = c.r * pAlpha;
-            colors[idx3 + 1] = c.g * pAlpha;
-            colors[idx3 + 2] = c.b * pAlpha;
-            sizes[slot] = p.size * 2.2;
-          }
-          slot++;
-        }
-      }
-
-      for (; slot < count; slot++) {
-        const idx3 = slot * 3;
-        colors[idx3] = colors[idx3 + 1] = colors[idx3 + 2] = 0;
-        sizes[slot] = 0;
-      }
-
-      commitGroup(barrageGroup);
-    }
-
     // ---- animejs-driven feel -----------------------------------------------
     const auraFormation = { v: 0 };
     const ghostFormation = { v: 0 };
-    const standFormation = { v: 0 };
     const blackoutFade = { v: 0 };
     function setFormationTarget(formation, active) {
       animate(formation, {
@@ -1373,12 +1294,9 @@
         radiusScale,
         radiusBase,
         activeBurstCount: bursts.length,
-        activeBarrageCount: barrages.length,
         auraActive,
         expandActive,
         ghostActive,
-        standActive,
-        standAngle,
         paletteIndex,
         charging,
         chargeLevel,
@@ -1433,10 +1351,8 @@
 
       const auraF = auraFormation.v;
       const ghostF = ghostFormation.v;
-      const standF = standFormation.v;
       auraIntensityUniform.value = auraF + audio.treb * 0.6;
       ghostIntensityUniform.value = ghostF * (1 + audio.treb);
-      standIntensityUniform.value = standF * (1 + audio.mid * 0.8);
 
       // Audio-reactive modulation: bass swells the spot, mids fatten the grain
       const audioR = 1 + audio.bass * 0.35 + audio.beatPulse * 0.12;
@@ -1464,9 +1380,7 @@
       updateFigure(currentX, currentY, figureScale, auraF);
       updateEmbers(currentX, currentY, figureScale, auraF);
       updateGhost(currentX, currentY, spotRadius, ghostF);
-      updateStand(currentX, currentY, w, h, standF);
       const burstFlash = updateBursts(effMs);
-      updateBarrages(effMs);
 
       // Flash plane: burst impact + strobe (beat-synced when audio is live)
       let strobe = 0;
@@ -1489,7 +1403,8 @@
         haloMesh.visible = false;
       }
 
-      renderer.render(scene, camera);
+      if (post) post.render();
+      else renderer.render(scene, camera);
 
       if (probing) {
         let result;

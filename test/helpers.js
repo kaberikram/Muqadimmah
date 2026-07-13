@@ -124,7 +124,6 @@ const BUTTONS = {
   EXPAND: 2, // X
   RECENTER: 3, // Y
   GHOST: 4, // LB
-  STAND: 5, // RB
   SLOWMO: 6, // LT (analog)
   CHARGE: 7, // RT (analog)
   AUDIO: 8, // Select
