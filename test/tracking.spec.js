@@ -217,17 +217,32 @@ test('D-pad left/right cycles palettes and wraps', async ({ page }) => {
   expect(hook.paletteIndex).toBeGreaterThan(1); // wrapped to the last palette
 });
 
-test('D-pad up/down adjusts base spot size', async ({ page }) => {
-  const before = (await getHook(page)).radiusBase;
-
+test('D-pad up/down cycles the aura shape and wraps', async ({ page }) => {
   await tapButton(page, BUTTONS.DPAD_UP);
   let hook = await getHook(page);
-  expect(hook.radiusBase).toBeGreaterThan(before);
+  expect(hook.auraShape).toBe(1);
 
   await tapButton(page, BUTTONS.DPAD_DOWN);
   await tapButton(page, BUTTONS.DPAD_DOWN);
   hook = await getHook(page);
-  expect(hook.radiusBase).toBeLessThan(before);
+  expect(hook.auraShape).toBe(2); // wrapped to the last shape
+});
+
+test('RB steps base spot size and wraps past the max', async ({ page }) => {
+  const before = (await getHook(page)).radiusBase;
+
+  await tapButton(page, BUTTONS.SIZE);
+  let hook = await getHook(page);
+  expect(hook.radiusBase).toBeGreaterThan(before);
+
+  // Keep stepping: it must eventually wrap back below the starting size
+  let wrapped = false;
+  for (let i = 0; i < 12; i++) {
+    await tapButton(page, BUTTONS.SIZE);
+    hook = await getHook(page);
+    if (hook.radiusBase < before) { wrapped = true; break; }
+  }
+  expect(wrapped).toBe(true);
 });
 
 test('L3 toggles blackout', async ({ page }) => {
