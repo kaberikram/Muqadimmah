@@ -8,6 +8,12 @@ const PAGE_URL =
 
 const PAGE_URL_WEBGL = PAGE_URL;
 
+// The /peaceful show — same query flags, own page.
+const PAGE_URL_PEACEFUL =
+  'file://' +
+  path.resolve(__dirname, '..', 'public', 'peaceful', 'index.html') +
+  '?test=1&webgl=1&lowres=1';
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -39,6 +45,11 @@ async function installMockGamepad(page) {
 async function openProjector(page) {
   await installMockGamepad(page);
   await page.goto(PAGE_URL);
+}
+
+async function openPeaceful(page) {
+  await installMockGamepad(page);
+  await page.goto(PAGE_URL_PEACEFUL);
 }
 
 function setAxes(page, x, y) {
@@ -83,6 +94,10 @@ function getHook(page) {
   return page.evaluate(() => window.__spotlightTestHook);
 }
 
+function getPeacefulHook(page) {
+  return page.evaluate(() => window.__peacefulTestHook);
+}
+
 async function waitForTestHook(page, timeoutMs = 15000) {
   await page.waitForFunction(() => window.__spotlightTestHook != null, null, {
     timeout: timeoutMs,
@@ -101,15 +116,40 @@ async function waitForTestHook(page, timeoutMs = 15000) {
   );
 }
 
-async function sampleHookKey(page, key, durationMs, intervalMs = 16) {
+async function waitForPeacefulHook(page, timeoutMs = 30000) {
+  await page.waitForFunction(() => window.__peacefulTestHook != null, null, {
+    timeout: timeoutMs,
+  });
+  await page.waitForFunction(
+    () => {
+      const hook = window.__peacefulTestHook;
+      return (
+        hook.canvasVisible === true &&
+        hook.gamepadConnected === true &&
+        hook.cutCount > 0
+      );
+    },
+    null,
+    { timeout: timeoutMs, polling: 50 }
+  );
+}
+
+async function sampleHookKey(page, key, durationMs, intervalMs = 16, hookName = '__spotlightTestHook') {
   const samples = [];
   const end = Date.now() + durationMs;
   while (Date.now() < end) {
-    const v = await page.evaluate((k) => window.__spotlightTestHook?.[k], key);
+    const v = await page.evaluate(
+      ([k, h]) => window[h]?.[k],
+      [key, hookName]
+    );
     if (typeof v === 'number') samples.push(v);
     await sleep(intervalMs);
   }
   return samples;
+}
+
+function samplePeacefulKey(page, key, durationMs, intervalMs = 16) {
+  return sampleHookKey(page, key, durationMs, intervalMs, '__peacefulTestHook');
 }
 
 function sampleCurrentX(page, durationMs, intervalMs = 16) {
@@ -144,10 +184,14 @@ const BUTTONS = {
 module.exports = {
   PAGE_URL,
   PAGE_URL_WEBGL,
+  PAGE_URL_PEACEFUL,
   BUTTONS,
   sleep,
   installMockGamepad,
   openProjector,
+  openPeaceful,
+  getPeacefulHook,
+  waitForPeacefulHook,
   setAxes,
   setRightStick,
   setButton,
@@ -156,5 +200,6 @@ module.exports = {
   waitForTestHook,
   sampleCurrentX,
   sampleHookKey,
+  samplePeacefulKey,
   peakToPeak,
 };

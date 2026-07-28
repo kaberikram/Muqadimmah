@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Peaceful</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; cursor: none; }
+
+    #peaceful-canvas {
+      position: fixed; inset: 0;
+      width: 100vw; height: 100vh;
+      display: none;
+    }
+
+    #connect-view {
+      position: fixed; inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.5rem;
+      background: #000;
+      color: #fff;
+      text-align: center;
+      padding: 2rem;
+      cursor: default;
+    }
+    #connect-view.hidden { display: none; }
+    #connect-view .icon { font-size: clamp(4rem, 12vw, 8rem); }
+    #connect-view h1 { font-size: clamp(1.5rem, 4vw, 2.5rem); font-weight: 600; letter-spacing: 0.12em; }
+    #connect-view p  { font-size: clamp(0.95rem, 2vw, 1.2rem); color: #999; max-width: 42rem; line-height: 1.5; }
+    #connect-view .map {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: clamp(0.7rem, 1.4vw, 0.85rem);
+      color: #666; line-height: 1.8; letter-spacing: 0.04em;
+      column-count: 2; column-gap: 3rem; text-align: left;
+    }
+    #connect-view .map b { color: #bbb; font-weight: 600; }
+
+    #hud {
+      position: fixed; left: 1.2rem; bottom: 1.2rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; line-height: 1.75; letter-spacing: 0.08em;
+      color: #777; text-transform: uppercase;
+      display: none; pointer-events: none; z-index: 30;
+    }
+    #hud.visible { display: block; }
+    #hud b { color: #ddd; font-weight: 600; }
+    #hud-status { margin-top: 0.6em; color: #aaa; }
+
+    #toast {
+      position: fixed; top: 6vh; left: 50%; transform: translateX(-50%);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px; letter-spacing: 0.35em; text-transform: uppercase;
+      color: #fff; opacity: 0; pointer-events: none; z-index: 30;
+      text-indent: 0.35em; /* balance the trailing letter-spacing */
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "../vendor/three/three.core.js",
+      "three/webgpu": "../vendor/three/three.webgpu.js",
+      "three/tsl": "../vendor/three/three.tsl.js",
+      "three/addons/tsl/display/BloomNode.js": "../vendor/three/BloomNode.js",
+      "animejs": "../vendor/animejs/index.js",
+      "animejs/adapters/three": "../vendor/animejs/adapters/three/index.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="connect-view">
+    <div class="icon">▚</div>
+    <h1>Peaceful</h1>
+    <p>Plug in or pair a gamepad, then <strong style="color:#fff">press any button</strong> to start. Press <strong style="color:#fff">Select</strong> and play music out loud — the panels cut on the beat.</p>
+    <div class="map">
+      <div><b>L-stick</b> orbit camera</div>
+      <div><b>R-stick</b> dolly · depth</div>
+      <div><b>A</b> cut now</div>
+      <div><b>B</b> figures on/off</div>
+      <div><b>LT</b> (hold) slow motion</div>
+      <div><b>RT</b> (hold) charge → cut</div>
+      <div><b>D-pad ↑↓</b> panel count</div>
+      <div><b>D-pad ←→</b> palette</div>
+      <div><b>L3</b> blackout</div>
+      <div><b>Select</b> audio-reactive</div>
+      <div><b>Start</b> this overlay</div>
+    </div>
+  </div>
+
+  <canvas id="peaceful-canvas"></canvas>
+
+  <div id="hud">
+    <div><b>L-stick</b> orbit · <b>R-stick</b> dolly/depth · <b>A</b> cut · <b>B</b> figures · <b>LT</b> slow-mo · <b>RT</b> charge</div>
+    <div><b>D-pad ↑↓</b> panels · <b>D-pad ←→</b> palette · <b>L3</b> blackout · <b>Select</b> audio · <b>Start</b> hide this</div>
+    <div id="hud-status"></div>
+  </div>
+  <div id="toast"></div>
+
+  <script type="module">
+    'use strict';
+
+    import * as THREE from 'three/webgpu';
+    import {
+      uniform, time, vec2, vec3, float, sin, fract, dot,
+      instancedBufferAttribute, uv, smoothstep, mix, pass, screenUV,
+    } from 'three/tsl';
+    import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+    import { animate } from 'animejs';
+
+    import { BODY_CLOUD } from '../body-cloud.js';
+    import { clamp, smoothFollow, gaussRandom } from '../lib/math.js';
+    import { makePalette } from '../lib/palette.js';
+    import { createAudio } from '../lib/audio.js';
+    import { BTN, createGamepadReader } from '../lib/gamepad.js';
+
+    const pageParams = new URLSearchParams(window.location.search);
+    const isTestMode = pageParams.get('test') === '1';
+    const forceWebGL = pageParams.get('webgl') === '1';
+    const lowRes = pageParams.get('lowres') === '1';
+
+    const connectView = document.getElementById('connect-view');
+    const canvas = document.getElementById('peaceful-canvas');
+    const hudEl = document.getElementById('hud');
+    const hudStatusEl = document.getElementById('hud-status');
+    const toastEl = document.getElementById('toast');
+
+    // ---- Tunables ---------------------------------------------------------
+    const PANEL_POOL = 7;
+    const PANEL_COUNT_DEFAULT = 3;
+    const PANEL_COUNT_MIN = 1;
+    const PANEL_COUNT_MAX = 5;
+    // Panels must be wider than a figure (2.45 units at full scale): the
+    // silhouettes blend multiplicatively, so they are only visible where they
+    // have light behind them.
+    const PANEL_W = 2.45;             // world units
+    const PANEL_H = 4.3;
+    const PANEL_STEP_X = 2.5;         // lateral stride between panels
+    const PANEL_STEP_Z = 2.4;         // depth stride — the parallax lever
+    const PANEL_STEP_Y = 0.30;        // the staircase rise of reference 1
+    const PANEL_EASE = 7;             // how fast a panel slides to its cut pose
+
+    const FIGURE_SLOTS = 3;
+    // The baked cloud is an arms-out pose measuring 1.885 × 1.546 × 0.468 —
+    // wider than it is tall, so it can't stand inside a panel opening. Figures
+    // are staged in FRONT of the panel array instead and read as backlit
+    // silhouettes, which is the second reference's composition anyway.
+    const FIGURE_POINTS = 4096;
+    const FIGURE_SCALE = 1.15;
+    const FIGURE_POINT_SIZE = 0.12;   // big enough that particles fuse into a mass
+    const FIGURE_HEAD_Y = 0.658;   // head centre in cloud-local units
+    const FIGURE_FOOT_Y = -0.781;  // cloud min y — used to stand figures on a line
+    const FIGURE_GROUND_Y = -1.55; // world y the feet rest on
+    const FIGURE_STANDOFF = 0.75;  // how far in front of its own panel a figure stands
+    const FIGURE_EASE = 9;
+
+    const CAM_DIST_DEFAULT = 8.6;
+    const CAM_DIST_MIN = 5.0;
+    const CAM_DIST_MAX = 14.0;
+    const CAM_YAW_LIMIT = 0.62;       // radians either side of centre
+    const CAM_PITCH_LIMIT = 0.34;
+    const CAM_RATE = 2.4;             // stick → target orbit speed
+    const CAM_EASE = 3.2;             // target → actual, the parallax glide
+
+    const CUT_MIN_INTERVAL_MS = 400;  // beats closer than this don't re-cut
+    const CUT_IDLE_INTERVAL_MS = 3500; // keeps moving with audio off
+    const SLOWMO_DEPTH = 0.78;
+    const TRIGGER_THRESHOLD = 0.06;
+    const CHARGE_RATE = 0.9;
+    const CHARGE_MIN_CUT = 0.12;
+
+    // ---- State ------------------------------------------------------------
+    let renderer = null;
+    let scene = null;
+    let camera = null;
+    let post = null;
+
+    let effT = 0;
+    let effMs = 0;
+    let lastDrawTime = performance.now();
+    // Cut scheduling runs on the real clock, not the dilated effect clock:
+    // beats arrive in wall time, and slow-mo should stretch motion without
+    // stretching the musical cadence.
+    let nowMs = performance.now();
+    let timeScale = 1;
+
+    let gamepadConnected = false;
+    let panelCount = PANEL_COUNT_DEFAULT;
+    let figuresOn = true;
+    let figureCount = 2;
+    let cutCount = 0;
+    let lastCutAt = -1e9;
+    let cutFlash = 0;
+    let hudVisible = false;
+    let blackoutActive = false;
+    const blackoutFade = { v: 0 };
+    let charging = false;
+    let chargeLevel = 0;
+
+    let camYaw = 0, camPitch = 0, camDist = CAM_DIST_DEFAULT;
+    let camYawTarget = 0, camPitchTarget = 0, camDistTarget = CAM_DIST_DEFAULT;
+    let depthSpread = 1;              // right-stick Y widens the z stride
+    let depthSpreadTarget = 1;
+
+    let panels = [];
+    let figures = [];
+    let flashMesh = null;
+    let blackMesh = null;
+
+    const palette = makePalette({ animate });
+    const audioIn = createAudio({ isTestMode, onBeat: () => requestCut('beat') });
+    const audio = audioIn.audio;
+    const pad = createGamepadReader({
+      onMappingWarning: () => toast('NON-STANDARD PAD — MAPPING MAY DIFFER'),
+    });
+
+    // ---- Toast ------------------------------------------------------------
+    let toastAnim = null;
+    function toast(msg) {
+      toastEl.textContent = msg;
+      if (toastAnim) toastAnim.cancel();
+      toastEl.style.opacity = '1';
+      toastAnim = animate(toastEl, { opacity: 0, duration: 600, delay: 900, ease: 'inQuad' });
+    }
+
+    function renderViews() {
+      connectView.classList.toggle('hidden', gamepadConnected);
+      canvas.style.display = gamepadConnected ? 'block' : 'none';
+    }
+
+    // ---- Panels -----------------------------------------------------------
+    // A lit rectangle: box distance field feathered per-axis, with a vertical
+    // gradient between two palette colours. Each panel owns its uniforms so the
+    // cut scheduler can drive brightness and colour per panel.
+    function makePanel() {
+      const brightness = uniform(0);
+      const cTop = uniform(new THREE.Color(1, 1, 1));
+      const cBottom = uniform(new THREE.Color(1, 1, 1));
+      const softX = uniform(0.30);
+      const softY = uniform(0.48);
+
+      const material = new THREE.MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        depthTest: false,
+        blending: THREE.AdditiveBlending,
+        // The quads are viewed from both sides as the camera orbits.
+        side: THREE.DoubleSide,
+      });
+
+      const q = uv().sub(0.5).mul(2.0).abs();
+      const edgeX = smoothstep(float(1.0), float(1.0).sub(softX), q.x);
+      const edgeY = smoothstep(float(1.0), float(1.0).sub(softY), q.y);
+      const grad = uv().y;
+      material.colorNode = mix(cBottom, cTop, smoothstep(0.0, 1.0, grad)).mul(brightness);
+      material.opacityNode = edgeX.mul(edgeY);
+
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+      mesh.frustumCulled = false;
+
+      // Wider, dimmer twin behind the panel reads as light spill. Built fresh
+      // rather than cloned — node materials don't deep-copy their node graphs.
+      const spillMat = new THREE.MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        depthTest: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+      });
+      spillMat.colorNode = mix(cBottom, cTop, smoothstep(0.0, 1.0, grad)).mul(brightness).mul(0.30);
+      spillMat.opacityNode = smoothstep(float(1.0), float(0.0), q.length()).pow(2.2);
+      const spill = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), spillMat);
+      spill.frustumCulled = false;
+
+      return {
+        mesh, spill, brightness, cTop, cBottom, softX, softY,
+        // Pose the panel eases toward; the cut writes targets, draw() glides.
+        x: 0, y: 0, z: 0, w: PANEL_W, h: PANEL_H,
+        tx: 0, ty: 0, tz: 0, tw: PANEL_W, th: PANEL_H,
+        bright: 0, tBright: 0, colorT: 0,
+        active: false,
+      };
+    }
+
+    // ---- Figures ----------------------------------------------------------
+    // Silhouettes must OCCLUDE the panels, not glow. Near-black points under
+    // normal blending still lifted the frame (colour survives sRGB encoding and
+    // stacks), so the particles instead blend multiplicatively — dst *= (1−α).
+    // That makes each one a pure light-blocker whatever colour it carries, and
+    // overlapping particles compound into a solid mass. The head halo is the
+    // one additive part, matching the reference cutouts.
+    function sampleBody() {
+      const n = BODY_CLOUD.length / 3;
+      const k = (Math.random() * n | 0) * 3;
+      // A few strays soften the edge into haze; too many and the silhouette
+      // stops reading as a body.
+      const stray = Math.random() < 0.03;
+      const j = stray ? 0.035 : 0.012;
+      return {
+        x: BODY_CLOUD[k] + gaussRandom() * j,
+        y: BODY_CLOUD[k + 1] + gaussRandom() * j,
+        z: BODY_CLOUD[k + 2] + gaussRandom() * j,
+        dim: stray ? 0.5 : 1,
+      };
+    }
+
+    function makeFigure() {
+      const posAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIGURE_POINTS * 3), 3);
+      const sizeAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIGURE_POINTS), 1);
+      posAttr.setUsage(THREE.DynamicDrawUsage);
+      sizeAttr.setUsage(THREE.DynamicDrawUsage);
+
+      // Sprite + PointsNodeMaterial is the instanced-quad trick: WebGPU point
+      // primitives are always 1px, so each particle is a camera-facing quad
+      // whose position/colour/size come from instanced attributes. sizeNode is
+      // a pixel size that attenuates with distance (sizeAttenuation defaults
+      // true on PointsMaterial), so figures shrink as they recede — the depth
+      // cue we want here, unlike the pixel-space show.
+      const alphaU = uniform(0);
+      const material = new THREE.PointsNodeMaterial();
+      material.transparent = true;
+      material.depthWrite = false;
+      material.depthTest = false;
+      // dst *= (1 − srcAlpha): source colour contributes nothing, so the
+      // particle can only remove light. Black over black stays black.
+      material.blending = THREE.CustomBlending;
+      material.blendEquation = THREE.AddEquation;
+      material.blendSrc = THREE.ZeroFactor;
+      material.blendDst = THREE.OneMinusSrcAlphaFactor;
+      // Colour only. Left to default, the same factors apply to the alpha
+      // channel and punch the canvas transparent where a figure stands — it
+      // merely looks black because the page behind is, and any readback
+      // un-premultiplies those pixels back to bright.
+      material.blendEquationAlpha = THREE.AddEquation;
+      material.blendSrcAlpha = THREE.ZeroFactor;
+      material.blendDstAlpha = THREE.OneFactor;
+      material.positionNode = instancedBufferAttribute(posAttr);
+      material.colorNode = vec3(0, 0, 0);
+      material.sizeNode = instancedBufferAttribute(sizeAttr);
+      // Mostly-solid round brush: the core must be opaque enough that overlapping
+      // particles read as one mass, with just enough feather to avoid dot edges.
+      const brush = uv().sub(0.5).mul(2.0).length();
+      material.opacityNode = smoothstep(1.0, 0.45, brush).mul(alphaU);
+
+      const points = new THREE.Sprite(material);
+      points.count = FIGURE_POINTS;
+      points.frustumCulled = false;
+
+      const model = [];
+      for (let i = 0; i < FIGURE_POINTS; i++) model.push(sampleBody());
+
+      // Head halo — the glow in the reference silhouettes.
+      const haloBright = uniform(0);
+      const haloColor = uniform(new THREE.Color(1, 1, 1));
+      const haloMat = new THREE.MeshBasicNodeMaterial({
+        transparent: true, depthWrite: false, depthTest: false,
+        blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      });
+      const d = uv().sub(0.5).length().mul(2.0).clamp(0.0, 1.0);
+      haloMat.colorNode = haloColor.mul(haloBright);
+      haloMat.opacityNode = smoothstep(1.0, 0.0, d).pow(2.0);
+      const halo = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), haloMat);
+      halo.frustumCulled = false;
+
+      return {
+        points, posAttr, sizeAttr, alphaU,
+        positions: posAttr.array, sizes: sizeAttr.array,
+        model, halo, haloBright, haloColor,
+        x: 0, y: 0, z: 0, tx: 0, ty: 0, tz: 0,
+        scale: FIGURE_SCALE, alpha: 0, tAlpha: 0,
+        active: false,
+      };
+    }
+
+    function commitFigure(f) {
+      f.posAttr.needsUpdate = true;
+      f.sizeAttr.needsUpdate = true;
+    }
+
+    // ---- Cut scheduler ----------------------------------------------------
+    // A cut reseeds the whole composition. Between cuts the scene barely moves,
+    // which is what makes the snap read as a cut rather than as noise.
+    function requestCut(reason) {
+      if (nowMs - lastCutAt < CUT_MIN_INTERVAL_MS) return false;
+      cutNow(reason);
+      return true;
+    }
+
+    function cutNow() {
+      lastCutAt = nowMs;
+      cutCount++;
+      cutFlash = 1;
+
+      const n = panelCount;
+      const spanX = (n - 1) * PANEL_STEP_X;
+      const spanZ = (n - 1) * PANEL_STEP_Z * depthSpread;
+      // Flip the diagonal's direction on some cuts so the composition rearranges
+      // instead of only breathing.
+      const dir = Math.random() < 0.5 ? 1 : -1;
+
+      for (let i = 0; i < panels.length; i++) {
+        const p = panels[i];
+        p.active = i < n;
+        if (!p.active) {
+          p.tBright = 0;
+          continue;
+        }
+        const t = n === 1 ? 0.5 : i / (n - 1);
+        p.tx = (i * PANEL_STEP_X - spanX / 2) * dir;
+        p.tz = -(i * PANEL_STEP_Z * depthSpread) + spanZ / 2;
+        p.ty = (i * PANEL_STEP_Y - (n - 1) * PANEL_STEP_Y / 2) * dir;
+        p.tw = PANEL_W * (0.90 + Math.random() * 0.24);
+        p.th = PANEL_H * (0.92 + Math.random() * 0.20);
+        p.colorT = t * 0.7 + Math.random() * 0.2;
+        p.tBright = 0.34 + Math.random() * 0.26;
+      }
+
+      figureCount = 1 + (Math.random() * FIGURE_SLOTS | 0); // 1..3
+      const slots = [];
+      for (let i = 0; i < n; i++) slots.push(i);
+      for (let i = slots.length - 1; i > 0; i--) {
+        const j = Math.random() * (i + 1) | 0;
+        [slots[i], slots[j]] = [slots[j], slots[i]];
+      }
+
+      // Stage the figures across the frame in front of the panels, each at its
+      // own depth so they separate under parallax instead of moving as a sheet.
+      const lit = panels.filter((p) => p.active);
+      for (let i = 0; i < figures.length; i++) {
+        const f = figures[i];
+        const on = figuresOn && i < figureCount;
+        f.active = on;
+        f.tAlpha = on ? 1 : 0;
+        if (!on) continue;
+        // Stand each figure in front of a lit panel — off to the side and it
+        // has no light behind it, so it simply disappears.
+        const host = lit[slots[i % Math.max(slots.length, 1)]] || lit[0];
+        f.scale = FIGURE_SCALE * (0.86 + Math.random() * 0.3);
+        // More figures than panels: fan them out across the host's width so
+        // they don't stack on one spot.
+        const lateral = figureCount > lit.length
+          ? (i - (figureCount - 1) / 2) * PANEL_W * 0.34
+          : 0;
+        f.tx = (host ? host.tx : 0) + lateral + (Math.random() - 0.5) * 0.45;
+        f.ty = FIGURE_GROUND_Y - FIGURE_FOOT_Y * f.scale;
+        // Just in front of its OWN panel. Staging every figure at one depth
+        // broke alignment under perspective — a figure sharing a distant
+        // panel's world x lands well off it on screen, and vanishes.
+        f.tz = (host ? host.tz : 0) + FIGURE_STANDOFF + Math.random() * 0.35;
+      }
+    }
+
+    // ---- Renderer ---------------------------------------------------------
+    function resizeRenderer() {
+      if (!renderer || !camera) return;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      renderer.setPixelRatio(lowRes ? 0.35 : Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(w, h, false);
+      camera.aspect = w / Math.max(h, 1);
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', resizeRenderer);
+
+    async function initRenderer() {
+      // alpha: false keeps the drawing buffer opaque. With a transparent canvas
+      // the additive panels leave varying alpha behind, and any readback
+      // un-premultiplies it — pixel probes then report dim areas as bright.
+      renderer = new THREE.WebGPURenderer({ canvas, antialias: true, forceWebGL, alpha: false });
+      await renderer.init();
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x000000);
+
+      camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 200);
+
+      for (let i = 0; i < PANEL_POOL; i++) {
+        const p = makePanel();
+        panels.push(p);
+        scene.add(p.spill);
+        scene.add(p.mesh);
+      }
+      for (let i = 0; i < FIGURE_SLOTS; i++) {
+        const f = makeFigure();
+        figures.push(f);
+        scene.add(f.points);
+        scene.add(f.halo);
+      }
+
+      // Fullscreen overlays live in front of the camera as children so they
+      // need no repositioning as it orbits.
+      const flashMat = new THREE.MeshBasicNodeMaterial({
+        color: 0xffffff, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
+        side: THREE.DoubleSide,
+      });
+      flashMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), flashMat);
+      flashMesh.position.set(0, 0, -0.4);
+      flashMesh.frustumCulled = false;
+      flashMesh.renderOrder = 9;
+      camera.add(flashMesh);
+
+      const blackMat = new THREE.MeshBasicNodeMaterial({
+        color: 0x000000, transparent: true, opacity: 0,
+        depthWrite: false, depthTest: false, side: THREE.DoubleSide,
+      });
+      blackMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blackMat);
+      blackMesh.position.set(0, 0, -0.4);
+      blackMesh.frustumCulled = false;
+      blackMesh.renderOrder = 10;
+      camera.add(blackMesh);
+      scene.add(camera);
+
+      // Postprocessing (WebGPU only) — bloom + chromatic aberration + vignette,
+      // then film grain and scanlines for the print-like reference treatment.
+      // The ?webgl=1 CI path keeps the plain render; software GL can't afford it.
+      if (!forceWebGL) {
+        post = new THREE.PostProcessing(renderer);
+        const scenePass = pass(scene, camera);
+        const sceneTex = scenePass.getTextureNode();
+        const bloomPass = bloom(scenePass, 0.72, 0.6, 0.0);
+        const off = screenUV.sub(0.5).mul(0.0022);
+        const ca = vec3(
+          sceneTex.sample(screenUV.add(off)).r,
+          sceneTex.sample(screenUV).g,
+          sceneTex.sample(screenUV.sub(off)).b,
+        );
+        const vig = screenUV.sub(0.5).length().mul(1.35).pow(2.0).oneMinus().clamp(0.25, 1.0);
+        // Cheap hash grain — fractal noise stalls software GL.
+        const grainSeed = screenUV.mul(vec2(1024.0, 1024.0)).add(time.mul(37.0));
+        const grain = fract(sin(dot(grainSeed, vec2(12.9898, 78.233))).mul(43758.5453)).sub(0.5);
+        const scan = sin(screenUV.y.mul(900.0)).mul(0.5).add(0.5).mul(0.055).oneMinus();
+        post.outputNode = ca.add(bloomPass).mul(vig).mul(scan).add(grain.mul(0.035));
+      }
+
+      resizeRenderer();
+      cutNow('init');
+    }
+
+    // ---- Per-frame updates ------------------------------------------------
+    function updatePanels(dt) {
+      const beat = audio.beatPulse;
+      for (const p of panels) {
+        p.x = smoothFollow(p.x, p.tx, PANEL_EASE, dt);
+        p.y = smoothFollow(p.y, p.ty, PANEL_EASE, dt);
+        p.z = smoothFollow(p.z, p.tz, PANEL_EASE, dt);
+        p.w = smoothFollow(p.w, p.tw, PANEL_EASE, dt);
+        p.h = smoothFollow(p.h, p.th, PANEL_EASE, dt);
+        p.bright = smoothFollow(p.bright, p.tBright, p.tBright > p.bright ? 18 : 6, dt);
+
+        const visible = p.bright > 0.002;
+        p.mesh.visible = visible;
+        p.spill.visible = visible;
+        if (!visible) continue;
+
+        p.mesh.position.set(p.x, p.y, p.z);
+        p.mesh.scale.set(p.w, p.h, 1);
+        p.spill.position.set(p.x, p.y, p.z - 0.05);
+        p.spill.scale.set(p.w * 1.9, p.h * 1.12, 1);
+
+        // Depth falloff: further panels sit back, which sells the corridor.
+        const depthFade = clamp(1 - (-p.z) * 0.045, 0.35, 1);
+        // Bright cream at the top falling to saturated amber — the panels blow
+        // out to flat white if both ends sit near the palette's core.
+        // Stay below the palette's cool rim stop (t≈1 is violet on SOLAR) so
+        // the panel reads cream-to-amber instead of greying out.
+        const cTop = palette.lerp(0.03 + p.colorT * 0.10);
+        const cBot = palette.lerp(0.48 + p.colorT * 0.24);
+        p.cTop.value.setRGB(cTop.r, cTop.g, cTop.b);
+        p.cBottom.value.setRGB(cBot.r, cBot.g, cBot.b);
+        p.brightness.value =
+          p.bright * depthFade * (1 + audio.bass * 0.5 + beat * 0.35 + chargeLevel * 0.5);
+      }
+    }
+
+    function updateFigures(dt) {
+      for (const f of figures) {
+        f.alpha = smoothFollow(f.alpha, f.tAlpha, FIGURE_EASE, dt);
+        f.x = smoothFollow(f.x, f.tx, FIGURE_EASE, dt);
+        f.y = smoothFollow(f.y, f.ty, FIGURE_EASE, dt);
+        f.z = smoothFollow(f.z, f.tz, FIGURE_EASE, dt);
+
+        const visible = f.alpha > 0.004;
+        f.points.visible = visible;
+        f.halo.visible = visible;
+        if (!visible) continue;
+
+        const s = f.scale;
+        // Idle sway keeps the silhouette alive between cuts.
+        const sway = Math.sin(effT * 0.9 + f.z * 2.1) * 0.02;
+        for (let i = 0; i < FIGURE_POINTS; i++) {
+          const m = f.model[i];
+          const i3 = i * 3;
+          f.positions[i3] = f.x + (m.x + sway * m.y) * s;
+          f.positions[i3 + 1] = f.y + m.y * s;
+          f.positions[i3 + 2] = f.z + m.z * s;
+          // Colour is irrelevant under the blocker blend — only size (and so
+          // coverage) varies per particle. Strays are smaller, giving a hazier edge.
+          f.sizes[i] = FIGURE_POINT_SIZE * s * m.dim;
+        }
+        commitFigure(f);
+        f.alphaU.value = f.alpha;
+
+        // Halo sits on the head, measured from the cloud rather than guessed.
+        const hy = f.y + FIGURE_HEAD_Y * s;
+        f.halo.position.set(f.x, hy, f.z + 0.02);
+        const haloS = 0.42 * s;
+        f.halo.scale.set(haloS, haloS, 1);
+        const hc = palette.lerp(0.1);
+        f.haloColor.value.setRGB(hc.r, hc.g, hc.b);
+        f.haloBright.value = f.alpha * (0.85 + audio.treb * 0.7 + audio.beatPulse * 0.4);
+      }
+    }
+
+    function updateCamera(dt) {
+      camYaw = smoothFollow(camYaw, camYawTarget, CAM_EASE, dt);
+      camPitch = smoothFollow(camPitch, camPitchTarget, CAM_EASE, dt);
+      camDist = smoothFollow(camDist, camDistTarget, CAM_EASE, dt);
+
+      // Slow idle drift so the frame is never truly static between cuts.
+      const driftY = Math.sin(effT * 0.21) * 0.045;
+      const driftX = Math.cos(effT * 0.17) * 0.055;
+      const yaw = camYaw + driftX;
+      const pitch = camPitch + driftY;
+
+      camera.position.set(
+        Math.sin(yaw) * camDist,
+        Math.sin(pitch) * camDist * 0.75 + 0.35,
+        Math.cos(yaw) * camDist,
+      );
+      camera.lookAt(0, 0, -1.2);
+    }
+
+    // ---- Input ------------------------------------------------------------
+    function readInput(dt) {
+      const f = pad.poll();
+      const wasConnected = gamepadConnected;
+      gamepadConnected = f.connected;
+      if (gamepadConnected !== wasConnected) renderViews();
+      if (!f.connected) return;
+
+      // Left stick — orbit. Moving the viewpoint is the strongest depth cue.
+      camYawTarget = clamp(camYawTarget + f.stick.x * CAM_RATE * dt, -CAM_YAW_LIMIT, CAM_YAW_LIMIT);
+      camPitchTarget = clamp(camPitchTarget - f.stick.y * CAM_RATE * dt, -CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
+
+      // Right stick — dolly (y) and depth spread (x).
+      camDistTarget = clamp(camDistTarget + f.rstick.y * 6.0 * dt, CAM_DIST_MIN, CAM_DIST_MAX);
+      depthSpreadTarget = clamp(depthSpreadTarget + f.rstick.x * 1.2 * dt, 0.45, 2.2);
+      depthSpread = smoothFollow(depthSpread, depthSpreadTarget, 5, dt);
+
+      if (f.edge(BTN.A)) {
+        cutNow('manual');
+        toast('CUT');
+      }
+      if (f.edge(BTN.B)) {
+        figuresOn = !figuresOn;
+        for (let i = 0; i < figures.length; i++) {
+          figures[i].active = figuresOn && i < figureCount;
+          figures[i].tAlpha = figures[i].active ? 1 : 0;
+        }
+        toast(figuresOn ? 'FIGURES' : 'FIGURES OFF');
+      }
+      if (f.edge(BTN.DPAD_UP)) {
+        panelCount = clamp(panelCount + 1, PANEL_COUNT_MIN, PANEL_COUNT_MAX);
+        cutNow('panels');
+        toast(`PANELS ${panelCount}`);
+      }
+      if (f.edge(BTN.DPAD_DOWN)) {
+        panelCount = clamp(panelCount - 1, PANEL_COUNT_MIN, PANEL_COUNT_MAX);
+        cutNow('panels');
+        toast(`PANELS ${panelCount}`);
+      }
+      if (f.edge(BTN.DPAD_LEFT)) toast(palette.cycle(-1));
+      if (f.edge(BTN.DPAD_RIGHT)) toast(palette.cycle(1));
+
+      if (f.edge(BTN.SELECT)) {
+        audioIn.toggle().then((status) => toast(`AUDIO ${status}`));
+      }
+      if (f.edge(BTN.START)) {
+        hudVisible = !hudVisible;
+        hudEl.classList.toggle('visible', hudVisible);
+      }
+      if (f.edge(BTN.L3)) {
+        blackoutActive = !blackoutActive;
+        animate(blackoutFade, { v: blackoutActive ? 1 : 0, duration: 260, ease: 'outQuad' });
+        toast(blackoutActive ? 'BLACKOUT' : 'BLACKOUT OFF');
+      }
+
+      // LT — analog time dilation (visuals only; input stays real-time)
+      timeScale = 1 - SLOWMO_DEPTH * clamp(f.value(BTN.LT), 0, 1);
+
+      // RT — hold to charge, release cuts hard
+      const rt = f.value(BTN.RT);
+      const wasCharging = charging;
+      charging = rt > TRIGGER_THRESHOLD;
+      if (charging) {
+        chargeLevel = clamp(chargeLevel + rt * CHARGE_RATE * dt, 0, 1);
+      } else if (wasCharging) {
+        if (chargeLevel >= CHARGE_MIN_CUT) {
+          cutNow('charge');
+          cutFlash = Math.min(1, 0.4 + chargeLevel);
+        }
+        chargeLevel = 0;
+      }
+    }
+
+    // ---- HUD & test hook --------------------------------------------------
+    function renderHud() {
+      if (!hudVisible) return;
+      hudStatusEl.textContent = [
+        `PANELS ${panelCount}`,
+        `FIGURES ${figuresOn ? figureCount : 0}`,
+        `CUTS ${cutCount}`,
+        palette.name,
+        audioIn.enabled
+          ? `AUDIO ●  BASS ${audio.bass.toFixed(2)}  TREB ${audio.treb.toFixed(2)}`
+          : 'AUDIO ○',
+      ].join('   ·   ');
+    }
+
+    let probeCanvas = null;
+    function runProbe() {
+      const S = 32;
+      if (!probeCanvas) {
+        probeCanvas = document.createElement('canvas');
+        probeCanvas.width = probeCanvas.height = S;
+      }
+      const ctx2 = probeCanvas.getContext('2d', { willReadFrequently: true });
+      ctx2.clearRect(0, 0, S, S);
+      // Whole frame: the panels can sit anywhere as the composition cuts.
+      ctx2.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, S, S);
+      const data = ctx2.getImageData(0, 0, S, S).data;
+      let max = 0;
+      let sum = 0;
+      let n = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const v = data[i] + data[i + 1] + data[i + 2];
+        if (v > max) max = v;
+        sum += v;
+        n++;
+      }
+      // max saturates on a lit panel, so occlusion has to be judged on the mean.
+      return { max, mean: sum / Math.max(n, 1) };
+    }
+    const probeRequests = [];
+    let idleCutsEnabled = true;
+    if (isTestMode) {
+      // noHalos hides the additive head glows for that one frame, so the probe
+      // measures body occlusion alone — the halos add more light than the
+      // bodies remove, which would otherwise mask the silhouette entirely.
+      window.__probeFrame = (opts) =>
+        new Promise((resolve) =>
+          probeRequests.push({ resolve, noHalos: !!(opts && opts.noHalos) })
+        );
+      // Pixel comparisons need a still composition: an idle cut landing between
+      // two probes reseeds panel brightness and positions, so the frames aren't
+      // comparable. Manual cuts (A, RT) still work while frozen.
+      window.__setIdleCuts = (on) => { idleCutsEnabled = !!on; };
+    }
+
+    function publishTestHook() {
+      window.__peacefulTestHook = {
+        canvasVisible: canvas.style.display !== 'none',
+        gamepadConnected,
+        panelCount,
+        figureCount: figuresOn ? figureCount : 0,
+        figuresOn,
+        cutCount,
+        paletteIndex: palette.index,
+        paletteName: palette.name,
+        cameraYaw: camYaw,
+        cameraYawTarget: camYawTarget,
+        cameraDist: camDist,
+        depthSpread,
+        blackoutActive,
+        blackoutFade: blackoutFade.v,
+        hudVisible,
+        audioEnabled: audioIn.enabled,
+        charging,
+        chargeLevel,
+        timeScale,
+      };
+    }
+
+    // ---- Main loop --------------------------------------------------------
+    function draw(now) {
+      requestAnimationFrame(draw);
+
+      const dt = Math.min(Math.max((now - lastDrawTime) / 1000, 1 / 240), 0.05);
+      lastDrawTime = now;
+      nowMs = now;
+
+      readInput(dt);
+
+      if (isTestMode) publishTestHook();
+      if (!gamepadConnected) return;
+
+      const dtE = dt * timeScale;
+      effT += dtE;
+      effMs += dtE * 1000;
+
+      audioIn.update(dt, now);
+
+      // With audio off (or between tracks) the idle timer keeps it cutting.
+      if (idleCutsEnabled && nowMs - lastCutAt > CUT_IDLE_INTERVAL_MS) cutNow('idle');
+
+      cutFlash = Math.max(0, cutFlash - dt * 9);
+
+      updateCamera(dt);
+      updatePanels(dt);
+      updateFigures(dt);
+
+      // A brief lift on the cut, not a strobe — this quad covers the whole
+      // frame, so anything stronger washes the composition out to grey.
+      flashMesh.material.opacity = Math.min(0.12, cutFlash * 0.09 + audio.beatPulse * 0.03);
+      blackMesh.material.opacity = blackoutFade.v;
+
+      renderHud();
+
+      if (post) post.render();
+      else renderer.render(scene, camera);
+
+      if (isTestMode) {
+        publishTestHook();
+        while (probeRequests.length) {
+          const req = probeRequests.pop();
+          if (!req.noHalos) {
+            req.resolve(runProbe());
+            continue;
+          }
+          const wasVisible = figures.map((f) => f.halo.visible);
+          figures.forEach((f) => { f.halo.visible = false; });
+          if (post) post.render();
+          else renderer.render(scene, camera);
+          req.resolve(runProbe());
+          figures.forEach((f, i) => { f.halo.visible = wasVisible[i]; });
+        }
+      }
+    }
+
+    async function start() {
+      await initRenderer();
+      if (isTestMode) {
+        window.__debug = {
+          scene, camera,
+          get renderer() { return renderer; },
+          get panels() { return panels; },
+          get figures() { return figures; },
+        };
+      }
+      renderViews();
+      requestAnimationFrame(draw);
+    }
+
+    start();
+  </script>
+</body>
+</html>
