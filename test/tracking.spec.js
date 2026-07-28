@@ -26,9 +26,11 @@ test('starts centered with canvas visible', async ({ page }) => {
   expect(hook.pointerY).toBeCloseTo(0.5, 1);
 });
 
+// Travel is MOVE_SPEED 0.55 screens/sec behind a ~200ms acceleration ramp, so
+// these sleeps buy noticeably less distance than they used to.
 test('pushing stick right moves spotlight right', async ({ page }) => {
   await setAxes(page, 1, 0);
-  await sleep(400);
+  await sleep(900);
   await setAxes(page, 0, 0);
 
   const hook = await getHook(page);
@@ -39,7 +41,7 @@ test('pushing stick right moves spotlight right', async ({ page }) => {
 
 test('pushing stick down moves spotlight down', async ({ page }) => {
   await setAxes(page, 0, 1);
-  await sleep(400);
+  await sleep(900);
   await setAxes(page, 0, 0);
 
   const hook = await getHook(page);
@@ -51,7 +53,9 @@ test('spotlight holds position when stick is released', async ({ page }) => {
   await setAxes(page, 1, 0);
   await sleep(400);
   await setAxes(page, 0, 0);
-  await sleep(300);
+  // The ramp decelerates rather than cutting speed dead, so the spot coasts a
+  // little after release — wait for that to bleed off before sampling.
+  await sleep(1400);
 
   const before = await getHook(page);
   const xs = await sampleCurrentX(page, 1000);
@@ -72,12 +76,44 @@ test('deflection inside the dead zone causes no movement', async ({ page }) => {
 
 test('pointer clamps at screen edge', async ({ page }) => {
   await setAxes(page, -1, 0);
-  await sleep(1500);
+  await sleep(2200);
   await setAxes(page, 0, 0);
 
   const hook = await getHook(page);
   expect(hook.pointerX).toBe(0);
   expect(hook.currentX).toBeLessThan(20);
+});
+
+test('travel accelerates into motion rather than starting at full speed', async ({ page }) => {
+  // Two fixed wall-clock windows rather than splitting a sampled array: polling
+  // round-trips jitter under load, so sample index is not a proxy for time.
+  const x0 = (await getHook(page)).pointerX;
+  await setAxes(page, 1, 0);
+
+  await sleep(350);
+  const x1 = (await getHook(page)).pointerX;
+  await sleep(350);
+  const x2 = (await getHook(page)).pointerX;
+  await setAxes(page, 0, 0);
+
+  const firstWindow = x1 - x0;
+  const secondWindow = x2 - x1;
+
+  // Under a ramp the second window covers ~1.7x the ground of the first. With
+  // speed applied instantly the two are equal — that's the regression.
+  expect(firstWindow).toBeGreaterThan(0);
+  expect(secondWindow).toBeGreaterThan(firstWindow * 1.25);
+});
+
+test('spot size steps down to a tight minimum', async ({ page }) => {
+  const before = (await getHook(page)).radiusBase;
+
+  // Geometric stepping: enough presses to walk the whole range down to the floor.
+  for (let i = 0; i < 14; i++) await tapButton(page, BUTTONS.DPAD_DOWN, 40);
+
+  const hook = await getHook(page);
+  expect(hook.radiusBase).toBeCloseTo(0.045, 3);
+  expect(hook.radiusBase).toBeLessThan(before / 4);
 });
 
 test('a gentle stick nudge moves without engaging cruise heading', async ({ page }) => {
@@ -97,7 +133,7 @@ test('a gentle stick nudge moves without engaging cruise heading', async ({ page
 
 test('full stick deflection engages cruise heading', async ({ page }) => {
   await setAxes(page, 1, 0);
-  await sleep(450);
+  await sleep(600);
 
   const hook = await getHook(page);
   expect(hook.flightIntent).toBeGreaterThan(0.9);
@@ -109,7 +145,7 @@ test('full stick deflection engages cruise heading', async ({ page }) => {
 
 test('releasing after cruise fades heading without low-speed spin', async ({ page }) => {
   await setAxes(page, 1, 0);
-  await sleep(450);
+  await sleep(600);
   let hook = await getHook(page);
   expect(hook.cruiseActive).toBe(true);
   const cruiseHeadingAmt = hook.flightHeadingAmount;
@@ -149,7 +185,7 @@ async function circleStick(page, turns, stepMs = 50, stepsPerTurn = 16) {
 
 test('circling the stick never accumulates whole turns of heading', async ({ page }) => {
   await setAxes(page, 1, 0);
-  await sleep(400);
+  await sleep(600);
   expect((await getHook(page)).cruiseActive).toBe(true);
 
   await circleStick(page, 3);
@@ -165,7 +201,7 @@ test('circling the stick never accumulates whole turns of heading', async ({ pag
 
 test('releasing after a long turn unwinds at most half a turn', async ({ page }) => {
   await setAxes(page, 1, 0);
-  await sleep(400);
+  await sleep(600);
   await circleStick(page, 3);
   await setAxes(page, 0, 0);
 
@@ -181,7 +217,9 @@ test('releasing after a long turn unwinds at most half a turn', async ({ page })
 
 test('a hard stick reversal turns without whipping', async ({ page }) => {
   await setAxes(page, 1, 0);
-  await sleep(900); // let the heading settle onto the stick before reversing
+  // Cruise engages only once travel speed builds, which the acceleration ramp
+  // delays — give the heading room to converge fully before reversing.
+  await sleep(1300);
   const before = await getHook(page);
   expect(before.cruiseActive).toBe(true);
   expect(before.flightHeading).toBeCloseTo(Math.PI / 2, 1);
@@ -219,12 +257,17 @@ test('heading follows the stick while pinned against a screen edge', async ({ pa
 test('A button spawns a burst that expires', async ({ page }) => {
   await tapButton(page, BUTTONS.BURST);
 
-  let hook = await getHook(page);
+  const hook = await getHook(page);
   expect(hook.activeBurstCount).toBeGreaterThan(0);
 
-  await sleep(1300);
-  hook = await getHook(page);
-  expect(hook.activeBurstCount).toBe(0);
+  // Burst lifetime is measured on the dilated effect clock, which advances
+  // slower than wall time whenever the frame rate dips (dt is clamped to 50ms).
+  // A fixed sleep made this flaky under load — wait for the condition instead.
+  await page.waitForFunction(
+    () => window.__spotlightTestHook?.activeBurstCount === 0,
+    null,
+    { timeout: 10000, polling: 100 }
+  );
 });
 
 test('holding A does not retrigger burst until released', async ({ page }) => {

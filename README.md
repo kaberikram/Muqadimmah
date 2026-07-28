@@ -74,21 +74,40 @@ Shared helpers live in `public/lib/` (`math`, `palette`, `audio`, `gamepad`) as 
 
 ## Feel & tuning
 
-Movement is a **velocity model**: stick deflection sets speed and direction, so you can park the spot on a performer and let go. A radial dead zone rejects stick drift, and an expo curve gives fine control near center with fast sweeps at full deflection.
+Movement is a **velocity model with an acceleration ramp**: stick deflection commands a speed, and actual speed eases toward it, so the spot leans into and out of motion instead of snapping to full pace. That's what makes a slow creep placeable when you're tracking a walking performer — and it low-passes hand tremor for free. A radial dead zone rejects stick drift, and an expo curve gives fine control near center.
+
+It's tuned for follow-spot work rather than fast whip-arounds. If you want the old lively feel back, raise `MOVE_SPEED` and `MOVE_ACCEL`.
 
 Tunables at the top of the script in `public/index.html`:
 
 | Constant | Default | Meaning |
 | --- | --- | --- |
-| `MOVE_SPEED` | `1.1` | Full-deflection travel, in screen-widths per second |
-| `STICK_DEADZONE` | `0.12` | Radial dead zone (raise if the spot drifts on its own) |
-| `STICK_EXPO` | `1.6` | Response curve; >1 = finer control near center |
+| `MOVE_SPEED` | `0.55` | Full-deflection travel, in screen-widths per second |
+| `MOVE_ACCEL` | `5` | How fast travel speed ramps in and out (lower = heavier) |
+| `STICK_DEADZONE` | `0.09` | Radial dead zone (raise if the spot drifts on its own) |
+| `STICK_EXPO` | `1.35` | Response curve; >1 = finer control near center |
 | `INVERT_Y` | `false` | Flip if up/down feels backwards on your controller |
-| `FOLLOW_RATE` | `28` | Spotlight easing (higher = snappier) |
+| `FOLLOW_RATE` | `20` | Spotlight easing (higher = snappier) |
 | `CHARGE_RATE` | `0.9` | Charge per second at full RT pull |
 | `SLOWMO_DEPTH` | `0.78` | Full LT pull slows effect time to 1 − this |
-| `RADIUS_BASE_*` | — | Spot size default / step / clamps for the D-pad |
+| `RADIUS_BASE_*` | — | Spot size default / ratio / clamps for the D-pad |
 | `BTN_*` | `0–15` | Button indices — remap everything here |
+
+### Tuning at the venue
+
+Three of these can be overridden by URL so you don't have to edit code on a show machine:
+
+```
+index.html?speed=0.4&accel=3&minsize=0.03
+```
+
+`speed` → `MOVE_SPEED`, `accel` → `MOVE_ACCEL`, `minsize` → the smallest D-pad spot size. Find what works in the room, then make it the default.
+
+### Spot size
+
+D-pad ↑↓ steps the size **geometrically** (×1.22 per press), so the tight end is as controllable as the wide end — a fixed step was a third of the whole range down there. The floor is a radius of 4.5% of the screen's short side; the HUD and toast show one decimal below 10 so consecutive steps stay distinguishable.
+
+Particle grain scales with the radius. It's sized in CSS pixels and the camera is orthographic, so without that a smaller spot kept the same fat dots and dissolved into a visible clump rather than a disc.
 
 ## Tests
 
