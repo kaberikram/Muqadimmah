@@ -4,6 +4,8 @@ const {
   BUTTONS,
   installMockGamepad,
   tapButton,
+  setButton,
+  getHook,
   waitForTestHook,
   sleep,
 } = require('./helpers');
@@ -44,4 +46,24 @@ test('the instanced sprite particles themselves emit light', async ({ page }) =>
   // that catches "all particles render as invisible 1px points".
   const lum = await page.evaluate(() => window.__probeFrame(true));
   expect(lum).toBeGreaterThan(30);
+});
+
+test('RT charge filaments emit visible light without the spotlight grain', async ({ page }) => {
+  await installMockGamepad(page);
+  await page.goto(PAGE_URL_WEBGL);
+  await waitForTestHook(page, 30000);
+  await sleep(300);
+
+  await setButton(page, BUTTONS.CHARGE, true);
+  await sleep(900);
+
+  const hook = await getHook(page);
+  expect(hook.charging).toBe(true);
+  expect(hook.chargeLevel).toBeGreaterThan(0.25);
+
+  // Hide disc/halo/grain/echoes: only charge ribbons should remain lit.
+  const lum = await page.evaluate(() => window.__probeFrame({ chargeOnly: true }));
+  expect(lum).toBeGreaterThan(20);
+
+  await setButton(page, BUTTONS.CHARGE, false);
 });

@@ -82,12 +82,12 @@
       <div><b>A</b> burst</div>
       <div><b>B</b> power aura</div>
       <div><b>X</b> (hold) expand</div>
-      <div><b>Y</b> recenter</div>
+      <div><b>Y</b> aura shape</div>
       <div><b>LB</b> ghost aura</div>
-      <div><b>RB</b> spot size</div>
+      <div><b>RB</b> spotlight shape</div>
       <div><b>LT</b> (hold) slow motion</div>
       <div><b>RT</b> (hold) charge → nova</div>
-      <div><b>D-pad ↑↓</b> aura shape</div>
+      <div><b>D-pad ↑↓</b> spot size</div>
       <div><b>D-pad ←→</b> palette</div>
       <div><b>L3</b> blackout</div>
       <div><b>R3</b> strobe</div>
@@ -99,8 +99,8 @@
   <canvas id="spotlight-canvas"></canvas>
 
   <div id="hud">
-    <div><b>L-stick</b> move · <b>R-stick</b> wind · <b>A</b> burst · <b>B</b> aura · <b>X</b> expand · <b>Y</b> recenter</div>
-    <div><b>LB</b> ghost · <b>RB</b> size · <b>LT</b> slow-mo · <b>RT</b> charge · <b>D-pad</b> shape/palette</div>
+    <div><b>L-stick</b> move · <b>R-stick</b> wind · <b>A</b> burst · <b>B</b> aura · <b>X</b> expand · <b>Y</b> aura shape</div>
+    <div><b>LB</b> ghost · <b>RB</b> spot shape · <b>LT</b> slow-mo · <b>RT</b> charge · <b>D-pad ↑↓</b> size · <b>D-pad ←→</b> palette</div>
     <div><b>L3</b> blackout · <b>R3</b> strobe · <b>Select</b> audio · <b>Start</b> hide this</div>
     <div id="hud-status"></div>
   </div>
@@ -112,12 +112,13 @@
     import * as THREE from 'three/webgpu';
     import {
       Fn, uniform, time, vec3, sin, cos, exp, float, atan,
-      instancedBufferAttribute, uv, smoothstep, mix,
+      instancedBufferAttribute, attribute, uv, smoothstep, mix,
       pass, screenUV,
     } from 'three/tsl';
     import { bloom } from 'three/addons/tsl/display/BloomNode.js';
     import { animate } from 'animejs';
     import 'animejs/adapters/three';
+    import { BODY_CLOUD } from './body-cloud.js';
 
     const pageParams = new URLSearchParams(window.location.search);
     const isTestMode = pageParams.get('test') === '1';
@@ -137,23 +138,23 @@
     const STICK_DEADZONE = 0.12;  // radial dead zone (drift rejection)
     const STICK_EXPO = 1.6;       // >1 = finer control near center
     const INVERT_Y = false;       // flip if your controller's Y axis feels backwards
-    const FOLLOW_RATE = 28;       // spotlight easing toward the pointer
+    const FOLLOW_RATE = 15;       // spotlight easing toward the pointer (lower = more float)
 
     // Standard gamepad mapping (Xbox layout) — every button does something
     const BTN_BURST = 0;      // A       tap: burst
     const BTN_AURA = 1;       // B       tap: warm power-aura figure
     const BTN_EXPAND = 2;     // X       hold: spotlight grows
-    const BTN_RECENTER = 3;   // Y       tap: snap to center
+    const BTN_AURASHAPE = 3;  // Y       tap: cycle aura shape
     const BTN_GHOST = 4;      // LB      tap: spectral ghost aura + afterimages
-    const BTN_SIZE = 5;       // RB      tap: step spot size (wraps)
+    const BTN_SPOTSHAPE = 5;  // RB      tap: cycle spotlight shape
     const BTN_SLOWMO = 6;     // LT      analog hold: time dilation
     const BTN_CHARGE = 7;     // RT      analog hold: charge in, release: nova
     const BTN_AUDIO = 8;      // Select  tap: audio-reactive mode (mic / interface)
     const BTN_HUD = 9;        // Start   tap: HUD overlay
     const BTN_BLACKOUT = 10;  // L3      tap: blackout
     const BTN_STROBE = 11;    // R3      tap: strobe (beat-synced when audio is on)
-    const BTN_DPAD_UP = 12;   //         aura shape +
-    const BTN_DPAD_DOWN = 13; //         aura shape −
+    const BTN_DPAD_UP = 12;   //         spot size +
+    const BTN_DPAD_DOWN = 13; //         spot size −
     const BTN_DPAD_LEFT = 14; //         palette −
     const BTN_DPAD_RIGHT = 15;//         palette +
 
@@ -166,6 +167,9 @@
     const TRIGGER_THRESHOLD = 0.06;   // analog triggers register above this
     const CHARGE_RATE = 0.9;          // charge/sec at full trigger pull
     const CHARGE_MIN_NOVA = 0.12;     // minimum charge that still detonates
+    const CHARGE_STREAK_COUNT = 40;   // fine threads racing into the spot
+    const CHARGE_SEGMENTS = 64;       // samples along each thread window
+    const CHARGE_BEAD_COUNT = 160;    // glowing particles riding the threads
     const SLOWMO_DEPTH = 0.78;        // full LT pull → timeScale = 1 - this
 
     const RADIUS_BASE_DEFAULT = 0.22; // spot radius as a fraction of min(w,h)
@@ -287,6 +291,22 @@
     let windX = 0;
     let windY = 0;
 
+    // Flight feel — smoothed travel velocity of the spotlight (px/s)
+    let flightVx = 0;
+    let flightVy = 0;
+    let flightSpeed01 = 0;
+    let flightIntent = 0;         // left-stick magnitude after deadzone/curve
+    let flightHeading = 0;        // last cruise heading (radians from upright −Y)
+    let flightHeadingAmount = 0;  // 0 = upright pose, 1 = full cruise yaw
+    let cruiseActive = false;
+    let prevFlightX = null;
+    let prevFlightY = null;
+
+    // Cruise engages only on a deliberate push; exits lower to avoid chatter.
+    const CRUISE_ENTER_INTENT = 0.38;
+    const CRUISE_EXIT_INTENT = 0.20;
+    const CRUISE_ENTER_SPEED = 0.22;
+
     // Ghost afterimage lag positions
     let echoAX = null, echoAY = null;
     let echoBX = null, echoBY = null;
@@ -299,6 +319,49 @@
       const alpha = 1 - Math.exp(-rate * dt);
       return current + (target - current) * alpha;
     }
+
+    // Shortest-path angle blend toward a target heading.
+    function smoothAngle(current, target, rate, dt) {
+      let d = target - current;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      return current + d * (1 - Math.exp(-rate * dt));
+    }
+
+    // Shared flight pose for spotlight + aura silhouettes.
+    function flightPose() {
+      const flapAmp = 0.30 + flightSpeed01 * 0.18;
+      const flapPhase = effT * (5.2 + audio.level * 3.5 + flightSpeed01 * 4.5);
+      // Visual yaw only while actively cruising — fades out on soft stick / release
+      const rot = flightHeading * flightHeadingAmount;
+      const bankBlend = 0.25 + 0.75 * flightHeadingAmount;
+      return {
+        speed01: flightSpeed01,
+        cosH: Math.cos(rot),
+        sinH: Math.sin(rot),
+        bankX: (flightVx / Math.max(flightRefSpeed, 1)) * 0.55 * bankBlend,
+        bankY: (flightVy / Math.max(flightRefSpeed, 1)) * 0.40 * bankBlend,
+        flapPhase,
+        flapAmp,
+        // Residual bob when still — dies off while darting
+        bob: Math.sin(effT * 2.2) * 0.018 * (1 - flightSpeed01 * 0.75),
+      };
+    }
+
+    // Apply heading yaw, velocity bank, and idle bob to a local shape point.
+    function orientLocal(x, y, z, wingS, fp) {
+      const bob = fp.bob * (1 + (wingS > 0 ? wingS * 1.8 : 0));
+      const yb = y + bob;
+      const hx = x * fp.cosH - yb * fp.sinH;
+      const hy = x * fp.sinH + yb * fp.cosH;
+      return {
+        x: hx + z * fp.bankX,
+        y: hy + z * fp.bankY,
+        z,
+      };
+    }
+
+    let flightRefSpeed = 1; // updated each frame from viewport + MOVE_SPEED
 
     function resizeCanvas() {
       if (!renderer || !camera) return;
@@ -344,6 +407,7 @@
       if (gamepadConnected !== wasConnected) renderViews();
       if (!gp) {
         prevButtons = [];
+        flightIntent = 0;
         return;
       }
 
@@ -352,6 +416,7 @@
       const ySign = INVERT_Y ? -1 : 1;
       pointerX = clamp(pointerX + stick.x * MOVE_SPEED * dt, 0, 1);
       pointerY = clamp(pointerY + stick.y * ySign * MOVE_SPEED * dt, 0, 1);
+      flightIntent = stick.mag;
 
       // Non-standard pads report different indices/axes; warn once so a
       // misbehaving layout is diagnosable instead of mysterious.
@@ -390,10 +455,7 @@
         auraActive = !auraActive;
         setFormationTarget(auraFormation, auraActive);
       }
-      if (edge(BTN_RECENTER)) {
-        pointerX = 0.5;
-        pointerY = 0.5;
-      }
+      if (edge(BTN_AURASHAPE)) cycleAuraShape(1);
       if (edge(BTN_GHOST)) {
         ghostActive = !ghostActive;
         setFormationTarget(ghostFormation, ghostActive);
@@ -417,14 +479,15 @@
         strobeActive = !strobeActive;
         toast(strobeActive ? 'STROBE' : 'STROBE OFF');
       }
-      if (edge(BTN_SIZE)) {
-        radiusBase = radiusBase + RADIUS_BASE_STEP > RADIUS_BASE_MAX + 1e-6
-          ? RADIUS_BASE_MIN
-          : radiusBase + RADIUS_BASE_STEP;
+      if (edge(BTN_SPOTSHAPE)) cycleSpotShape(1);
+      if (edge(BTN_DPAD_UP)) {
+        radiusBase = clamp(radiusBase + RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
         toast(`SPOT ${Math.round(radiusBase * 100)}`);
       }
-      if (edge(BTN_DPAD_UP)) cycleAuraShape(1);
-      if (edge(BTN_DPAD_DOWN)) cycleAuraShape(-1);
+      if (edge(BTN_DPAD_DOWN)) {
+        radiusBase = clamp(radiusBase - RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
+        toast(`SPOT ${Math.round(radiusBase * 100)}`);
+      }
       if (edge(BTN_DPAD_LEFT)) cyclePalette(-1);
       if (edge(BTN_DPAD_RIGHT)) cyclePalette(1);
 
@@ -602,6 +665,7 @@
     const discMidUniform = uniform(new THREE.Color(1, 1, 1));
     const discRimUniform = uniform(new THREE.Color(1, 1, 1));
     const discBrightUniform = uniform(1);
+    const discShapeFadeUniform = uniform(1);
 
     // Radial palette-gradient disc, evaluated in TSL. Scale = spot radius.
     function makeGradientDisc(falloffPow, alpha) {
@@ -619,7 +683,7 @@
         smoothstep(0.55, 1.0, d),
       );
       material.colorNode = col.mul(discBrightUniform);
-      material.opacityNode = smoothstep(1.0, 0.0, d).pow(falloffPow).mul(alpha);
+      material.opacityNode = smoothstep(1.0, 0.0, d).pow(falloffPow).mul(alpha).mul(discShapeFadeUniform);
       const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
       mesh.frustumCulled = false;
       return mesh;
@@ -795,61 +859,30 @@
       };
     }
 
-    // Dove banking mid-glide: body leaned into the turn, wings swept back
-    // with separated primary feathers at the tips, tail fanned to one side.
-    // Distinct pose from BIRD below — this one reads as gliding, not flapping
-    // square-on — but it still carries wingS so the flap wave animates it too.
-    function sampleGlidePoint() {
-      const u = Math.random();
-      const stray = Math.random() < 0.12;
-      let p;
-      if (u < 0.26) {
-        // Body: diagonal, leaned into the bank
-        const t = Math.random();
-        const along = -0.52 + t * 0.62;
-        const w = 0.045 + 0.055 * Math.sin(Math.min(1, t * 1.2) * Math.PI);
-        const bank = 0.22;
-        p = {
-          x: gaussRandom() * w * 0.5 + along * bank,
-          y: along,
-          z: gaussRandom() * w * 0.4,
-          wingS: 0, side: 1,
-          colorT: 0.1 + t * 0.25 + Math.random() * 0.15,
-        };
-      } else if (u < 0.36) {
-        // Tail: fanned feathers swept to one side
-        const len = 0.08 + Math.random() * 0.24;
-        const spread = -0.15 + Math.random() * 0.55;
-        p = {
-          x: spread * len * 1.3 + len * 0.22,
-          y: 0.06 + len * 0.92,
-          z: gaussRandom() * 0.02,
-          wingS: 0, side: 1,
-          colorT: 0.45 + len * 0.9 + Math.random() * 0.1,
-        };
-      } else {
-        // Wings: swept back at an angle, feather fingers separating near the tips
-        const side = Math.random() < 0.5 ? -1 : 1;
-        const s = Math.pow(Math.random(), 0.7);
-        const chord = Math.random();
-        const span = 0.09 + s * 0.64;
-        const sweep = s * s * 0.30; // tip trails backward/down into the bank
-        const finger = s > 0.72 ? Math.sin(chord * Math.PI * 4 + side) * 0.018 * (s - 0.72) * 3.6 : 0;
-        p = {
-          x: side * span,
-          y: -0.30 + chord * (0.09 + s * 0.30) + sweep + finger,
-          z: gaussRandom() * 0.03 + side * s * 0.05,
-          wingS: s, side,
-          colorT: Math.min(1, 0.22 + s * 0.58 + Math.random() * 0.15),
-        };
-      }
+    // Surface samples from body.glb (baked to body-cloud.js) — same grain
+    // language as the other shapes, not a solid mesh. Soul is the fallback
+    // if the cloud module failed to load.
+    const bodyCloud = (BODY_CLOUD && BODY_CLOUD.length >= 3) ? BODY_CLOUD : null;
+
+    function sampleBodyPoint() {
+      if (!bodyCloud) return sampleSoulPoint();
+      const n = bodyCloud.length / 3;
+      const i = (Math.random() * n | 0) * 3;
+      const stray = Math.random() < 0.14;
+      let x = bodyCloud[i];
+      let y = bodyCloud[i + 1];
+      let z = bodyCloud[i + 2];
       if (stray) {
-        p.x += gaussRandom() * 0.08;
-        p.y += gaussRandom() * 0.08;
-        p.z += gaussRandom() * 0.08;
+        x += gaussRandom() * 0.06;
+        y += gaussRandom() * 0.06;
+        z += gaussRandom() * 0.06;
       }
-      p.dim = stray ? 0.35 + Math.random() * 0.3 : 0.8 + Math.random() * 0.2;
-      return p;
+      return {
+        x, y, z,
+        wingS: 0, side: 1,
+        colorT: Math.min(1, Math.abs(x) * 0.45 + (y + 0.95) / 1.9 * 0.4 + (stray ? 0.25 : 0)),
+        dim: stray ? 0.35 + Math.random() * 0.3 : 0.8 + Math.random() * 0.2,
+      };
     }
 
     // Bird seen front-on, wings spread — the flap is applied at render time
@@ -900,11 +933,24 @@
       return p;
     }
 
-    // Aura shapes (D-pad ↑↓ cycles). Every particle carries a target in each
+    // Soft round spotlight disc — center brightest, shallow z volume.
+    function sampleSpotPoint() {
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.pow(Math.random(), 1.8);
+      return {
+        x: Math.cos(a) * r,
+        y: Math.sin(a) * r,
+        z: gaussRandom() * 0.12,
+        wingS: 0,
+        colorT: r,
+        dim: 0.45 + 0.55 * (1 - r),
+      };
+    }
+
+    // Aura shapes (Y cycles). Every particle carries a target in each
     // shape so cycling morphs the same cloud rather than swapping models.
     const AURA_SHAPES = [
-      { name: 'SOUL', sample: sampleSoulPoint },
-      { name: 'DOVE', sample: sampleGlidePoint },
+      { name: 'BODY', sample: sampleBodyPoint },
       { name: 'BIRD', sample: sampleBirdPoint },
     ];
     let auraShapeIndex = 0;
@@ -917,6 +963,34 @@
       shapeBlend.v = 0;
       animate(shapeBlend, { v: 1, duration: 750, ease: 'inOutQuad' });
       toast(AURA_SHAPES[auraShapeIndex].name);
+    }
+
+    // Spotlight shapes (RB cycles) — independent of the aura figure.
+    // Figure forms are scaled up so the silhouette reads at spot size.
+    const SPOT_SHAPES = [
+      { name: 'SPOT', sample: sampleSpotPoint, scale: 1.0 },
+      { name: 'BIRD', sample: sampleBirdPoint, scale: 1.6 },
+      { name: 'BODY', sample: sampleBodyPoint, scale: 1.6 },
+    ];
+    let spotShapeIndex = 0;
+    let spotShapeFrom = 0;
+    const spotShapeBlend = { v: 1 };
+
+    function cycleSpotShape(dir) {
+      spotShapeFrom = spotShapeIndex;
+      spotShapeIndex = (spotShapeIndex + dir + SPOT_SHAPES.length) % SPOT_SHAPES.length;
+      spotShapeBlend.v = 0;
+      animate(spotShapeBlend, { v: 1, duration: 750, ease: 'inOutQuad' });
+      toast(`SPOT ${SPOT_SHAPES[spotShapeIndex].name}`);
+    }
+
+    // 1 when the current form is a round SPOT, 0 at a figure; smooth during morph.
+    function spotRoundness() {
+      const fromRound = spotShapeFrom === 0 ? 1 : 0;
+      const toRound = spotShapeIndex === 0 ? 1 : 0;
+      const bl = spotShapeBlend.v;
+      const smoothBl = bl * bl * (3 - 2 * bl);
+      return fromRound + (toRound - fromRound) * smoothBl;
     }
 
     function buildFigureModel(count) {
@@ -975,17 +1049,179 @@
       }));
     }
 
-    function buildChargeModel(count) {
+    function buildSpotModel(count) {
+      return Array.from({ length: count }, () => ({
+        shapes: SPOT_SHAPES.map((s) => s.sample()),
+        seed: Math.random(),
+        jitter: 0.7 + Math.random() * 0.6,
+      }));
+    }
+
+    function buildChargeModel() {
       const model = [];
-      for (let i = 0; i < count; i++) {
+      const GOLDEN = 2.39996322972865;
+      for (let i = 0; i < CHARGE_STREAK_COUNT; i++) {
+        const seed = (i + 0.17) / CHARGE_STREAK_COUNT;
+        // Deterministic pseudo-randoms per strand
+        const h1 = Math.abs(Math.sin(i * 12.9898 + 78.233) * 43758.5453) % 1;
+        const h2 = Math.abs(Math.sin(i * 39.3468 + 11.135) * 24634.6345) % 1;
+        const h3 = Math.abs(Math.sin(i * 7.0898 + 47.11) * 12543.8765) % 1;
+        // Golden-angle stepping + big offsets: threads clump into clusters
+        // with dark gaps instead of an even wagon-wheel. Angles stay FIXED
+        // while charging — no field rotation.
+        const startAngle = i * GOLDEN + (h1 - 0.5) * 1.7;
+        // Window length as a fraction of the edge-to-core run
+        const threadLength = 0.55 + h1 * 0.25;
+        // Bokeh depth layer: 0 = far (hairline, sharp, slow),
+        // 1 = near (wider, softer, faster — parallax)
+        const depth = h3;
         model.push({
-          seed: Math.random(),
-          speed: 0.5 + Math.random() * 0.7,
-          twist: 1.5 + Math.random() * 3,
-          size: 1.5 + Math.random() * 2,
+          seed,
+          startAngle,
+          threadLength,
+          depth,
+          // Stagger threads across the whole suck cycle so the air is always
+          // full of threads at different stages of being pulled in
+          progress: h3 * (1 + threadLength) - threadLength,
+          suckRate: (0.75 + h2 * 0.55) * (1 + depth * 0.3),
+          // Signed bow amplitude — the actual bow breathes over time
+          bow: (h2 - 0.5) * 0.18,
+          bowRate: 0.5 + h3 * 0.7,
+          // Fast enough that the squiggle visibly slithers, not translates
+          speed: 1.5 + h1 * 2.0,
+          flowSpeed: 0.8 + h2 * 0.5,
+          packets: 2 + h3 * 1.5,
+          brightMul: 0.6 + h1 * 0.8,
+          // Fine noodle strands; near layers only slightly wider
+          widthAura: (1.2 + h2 * 1.6) * (1 + depth * 0.5),
+          widthCore: 0.35 + h3 * 0.45,
+          phase: h1 * Math.PI * 2,
+          // Ripple riding on the thread body; near layers billow more
+          waveAmp: (0.024 + h3 * 0.03) * (1 + depth * 0.8),
+          // Long fluid arcs, not tight zigzags
+          waveFreq1: 0.5 + seed * 0.5,
+          waveFreq2: 1.0 + (1 - seed) * 0.8,
+          waveFreq3: 1.6 + seed * 0.6,
+          // Each wave's amplitude breathes at its own rate so the curve morphs
+          modRate1: 0.6 + h1 * 0.6,
+          modRate2: 0.9 + h2 * 0.6,
+          modRate3: 1.2 + h3 * 0.6,
+          waveW1: 0.55,
+          waveW2: 0.32,
+          waveW3: 0.18,
         });
       }
       return model;
+    }
+
+    // Beads: glowing particles bound to threads. Each bead keeps a fixed
+    // thread-local offset so it slides inward with the thread body, plus a
+    // small perpendicular scatter so streams have body, not dots on a wire.
+    function buildChargeBeadModel() {
+      const model = [];
+      for (let i = 0; i < CHARGE_BEAD_COUNT; i++) {
+        const h1 = Math.abs(Math.sin(i * 17.234 + 3.77) * 43758.5453) % 1;
+        const h2 = Math.abs(Math.sin(i * 5.921 + 91.3) * 24634.6345) % 1;
+        const h3 = Math.abs(Math.sin(i * 29.71 + 55.5) * 12543.8765) % 1;
+        model.push({
+          threadIndex: i % CHARGE_STREAK_COUNT,
+          sOffset: h1,
+          scatter: (h2 - 0.5) * 6,
+          sizeBase: 0.9 + h3 * 1.1,
+          // ~12% accent sparkles from the palette rim, like the warm bokeh
+          // dots scattered through the reference's blue streams
+          colorT: h2 < 0.12 ? 0.85 + h3 * 0.15 : h3 * 0.45,
+          brightMul: 0.5 + h1 * 0.9,
+          flickFreq: 2 + h2 * 4,
+          flickPhase: h3 * Math.PI * 2,
+        });
+      }
+      return model;
+    }
+
+    // Continuous luminous ribbon: triangle strip along a centerline with a
+    // soft aura layer and a bright core layer so bloom reads as stringy light.
+    // All filaments share one material — vertex color carries brightness — so
+    // software-GL only compiles a single shader instead of one per strand.
+    // `across` (0→1 across the strip) feathers opacity so ribbons read as silk,
+    // not hard-edged tape.
+    let filamentMaterial = null;
+    function getFilamentMaterial() {
+      if (filamentMaterial) return filamentMaterial;
+      filamentMaterial = new THREE.MeshBasicNodeMaterial({
+        transparent: true, depthWrite: false, depthTest: false,
+        blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      });
+      filamentMaterial.colorNode = attribute('color', 'vec3');
+      filamentMaterial.opacityNode = sin(attribute('across', 'float').mul(3.14159265));
+      return filamentMaterial;
+    }
+
+    function makeFilamentRibbon(segments) {
+      const vertCount = (segments + 1) * 2;
+      const positions = new Float32Array(vertCount * 3);
+      const colors = new Float32Array(vertCount * 3);
+      const across = new Float32Array(vertCount);
+      const indices = new Uint16Array(segments * 6);
+      for (let i = 0; i <= segments; i++) {
+        across[i * 2] = 0;
+        across[i * 2 + 1] = 1;
+      }
+      for (let i = 0; i < segments; i++) {
+        const a = i * 2;
+        const o = i * 6;
+        indices[o] = a;
+        indices[o + 1] = a + 1;
+        indices[o + 2] = a + 2;
+        indices[o + 3] = a + 1;
+        indices[o + 4] = a + 3;
+        indices[o + 5] = a + 2;
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      const posAttr = new THREE.BufferAttribute(positions, 3);
+      const colAttr = new THREE.BufferAttribute(colors, 3);
+      posAttr.setUsage(THREE.DynamicDrawUsage);
+      colAttr.setUsage(THREE.DynamicDrawUsage);
+      geometry.setAttribute('position', posAttr);
+      geometry.setAttribute('color', colAttr);
+      geometry.setAttribute('across', new THREE.BufferAttribute(across, 1));
+      geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+
+      const mesh = new THREE.Mesh(geometry, getFilamentMaterial());
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      return { mesh, posAttr, colAttr, positions, colors, segments };
+    }
+
+    function makeChargeFilaments() {
+      const model = buildChargeModel();
+      const filaments = model.map((p) => ({
+        ...p,
+        aura: makeFilamentRibbon(CHARGE_SEGMENTS),
+        core: makeFilamentRibbon(CHARGE_SEGMENTS),
+      }));
+      return {
+        filaments,
+        pathScratch: Array.from({ length: CHARGE_SEGMENTS + 1 }, () => ({ x: 0, y: 0, z: 0, u: 0 })),
+        prevT: null,
+      };
+    }
+
+    // Ray from the spot along `angle` to the screen rectangle, then past it
+    // so every streak visibly enters from off-screen.
+    function rayPastScreenEdge(cx, cy, angle, screenW, screenH) {
+      const dx = Math.cos(angle);
+      const dy = Math.sin(angle);
+      let tHit = Infinity;
+      if (dx > 1e-6) tHit = Math.min(tHit, (screenW - cx) / dx);
+      if (dx < -1e-6) tHit = Math.min(tHit, (0 - cx) / dx);
+      if (dy > 1e-6) tHit = Math.min(tHit, (screenH - cy) / dy);
+      if (dy < -1e-6) tHit = Math.min(tHit, (0 - cy) / dy);
+      if (!Number.isFinite(tHit) || tHit < 0)
+        tHit = Math.hypot(screenW, screenH);
+      const t = tHit * 1.15;
+      return { x: cx + dx * t, y: cy + dy * t, dist: t, dx, dy };
     }
 
     async function initRenderer() {
@@ -1016,18 +1252,21 @@
       echoGroupB.points.visible = false;
       scene.add(echoGroupB.points);
 
-      // Spotlight grain
-      const SPOTLIGHT_COUNT = 140;
+      // Spotlight grain — denser so bird silhouettes read through bloom
+      const SPOTLIGHT_COUNT = 700;
       spotlightGroup = makeParticleGroup(SPOTLIGHT_COUNT);
-      spotlightGroup.model = buildDiscModel(SPOTLIGHT_COUNT, 1.8);
+      spotlightGroup.model = buildSpotModel(SPOTLIGHT_COUNT);
       scene.add(spotlightGroup.points);
 
-      // Charge inflow — particles spiral into the spot while RT is held
-      const CHARGE_COUNT = 150;
-      chargeGroup = makeParticleGroup(CHARGE_COUNT);
-      chargeGroup.model = buildChargeModel(CHARGE_COUNT);
-      chargeGroup.points.visible = false;
-      scene.add(chargeGroup.points);
+      // Charge inflow — hairline thread trails + bead particles riding them
+      chargeGroup = makeChargeFilaments();
+      for (const f of chargeGroup.filaments) {
+        scene.add(f.aura.mesh, f.core.mesh);
+      }
+      chargeGroup.beads = makeParticleGroup(CHARGE_BEAD_COUNT);
+      chargeGroup.beads.model = buildChargeBeadModel();
+      chargeGroup.beads.points.visible = false;
+      scene.add(chargeGroup.beads.points);
 
       // Aura figure (vague humanoid presence), gets the shimmering GPU displacement
       const FIGURE_COUNT = 1600;
@@ -1108,25 +1347,79 @@
         post.outputNode = ca.add(bloomPass).mul(vig);
       }
 
+      // Warm the shared filament shader at init so the first RT pull doesn't
+      // stall the effect clock (software GL compiles synchronously).
+      for (const f of chargeGroup.filaments) {
+        f.aura.mesh.visible = true;
+        f.core.mesh.visible = true;
+      }
+      if (post) post.render();
+      else renderer.render(scene, camera);
+      for (const f of chargeGroup.filaments) {
+        f.aura.mesh.visible = false;
+        f.core.mesh.visible = false;
+      }
+
       resizeCanvas();
     }
 
-    function updateSpotlight(cx, cy, radius, sizeMul, brightMul) {
+    function updateSpotlight(cx, cy, radius, sizeMul, brightMul, roundF) {
       const { positions, colors, sizes, model, count } = spotlightGroup;
+      const from = spotShapeFrom;
+      const to = spotShapeIndex;
+      const bl = spotShapeBlend.v;
+      const smoothBl = bl * bl * (3 - 2 * bl);
+      const scaleA = SPOT_SHAPES[from].scale;
+      const scaleB = SPOT_SHAPES[to].scale;
+      const fp = flightPose();
+      // Round SPOT: keep heading nearly identity so the disc stays circular
+      const birdish = 1 - roundF;
+      const fpSpot = {
+        ...fp,
+        cosH: birdish > 0.01 ? Math.cos(Math.atan2(fp.sinH, fp.cosH) * birdish) : 1,
+        sinH: birdish > 0.01 ? Math.sin(Math.atan2(fp.sinH, fp.cosH) * birdish) : 0,
+        bankX: fp.bankX * (0.35 + 0.65 * birdish),
+        bankY: fp.bankY * (0.35 + 0.65 * birdish),
+      };
+      const grainBoost = 1 + (1 - roundF) * 1.3;
+      const shapeFlap = (sp) => {
+        if (sp.wingS > 0) {
+          return sp.y - Math.sin(fp.flapPhase - sp.wingS * 1.6) * Math.pow(sp.wingS, 1.2) * fp.flapAmp;
+        }
+        return sp.y;
+      };
       for (let i = 0; i < count; i++) {
-        const { r, a, z, jitter } = model[i];
-        const dist = r * radius;
+        const p = model[i];
+        const pa = p.shapes[from];
+        const pb = p.shapes[to];
+        const ax = pa.x * scaleA;
+        const ay = shapeFlap(pa) * scaleA;
+        const az = pa.z * scaleA;
+        const bx = pb.x * scaleB;
+        const by = shapeFlap(pb) * scaleB;
+        const bz = pb.z * scaleB;
+        const mx = ax + (bx - ax) * smoothBl;
+        const my = ay + (by - ay) * smoothBl;
+        const mz = az + (bz - az) * smoothBl;
+        const wingS = (pa.wingS || 0) + ((pb.wingS || 0) - (pa.wingS || 0)) * smoothBl;
+        const o = orientLocal(mx, my, mz, wingS, fpSpot);
+        const lx = o.x * radius;
+        const ly = o.y * radius;
+        const lz = o.z * radius;
+        const colorT = pa.colorT + (pb.colorT - pa.colorT) * smoothBl;
+        const dim = pa.dim + (pb.dim - pa.dim) * smoothBl;
         const idx3 = i * 3;
-        positions[idx3] = cx + Math.cos(a) * dist;
-        positions[idx3 + 1] = cy + Math.sin(a) * dist;
-        positions[idx3 + 2] = z * radius;
-        const zf = clamp(1 + z * 0.8, 0.6, 1.4);
-        const falloff = (1 - r) * brightMul * (0.7 + 0.3 * zf);
-        const c = lerpPalette(r);
+        positions[idx3] = cx + lx;
+        positions[idx3 + 1] = cy + ly;
+        positions[idx3 + 2] = lz;
+        const zf = clamp(1 + lz / Math.max(radius, 1e-4) * 0.8, 0.6, 1.4);
+        const flicker = 0.7 + 0.3 * Math.sin(effT * 5 + p.seed * 30);
+        const falloff = dim * brightMul * grainBoost * (0.7 + 0.3 * zf) * flicker;
+        const c = lerpPalette(colorT);
         colors[idx3] = c.r * falloff;
         colors[idx3 + 1] = c.g * falloff;
         colors[idx3 + 2] = c.b * falloff;
-        sizes[i] = (1.5 + (1 - r) * 5) * sizeMul * jitter * zf;
+        sizes[i] = (2 + dim * 5) * sizeMul * p.jitter * zf;
       }
       commitGroup(spotlightGroup);
     }
@@ -1159,19 +1452,14 @@
       if (!visible) return;
 
       const scatterT = 1 - formation;
-      // Slight view shear from z as the spot moves — parallax under the
-      // orthographic camera, so the cloud reads as a volume, not a cutout.
-      const shearX = (pointerX - 0.5) * 0.35;
-      const shearY = (pointerY - 0.5) * 0.25;
-      // Wingbeat: a wave that travels outward along the span, faster with music
-      const flapPhase = effT * (5.2 + audio.level * 3.5);
+      const fp = flightPose();
       const from = auraShapeFrom;
       const to = auraShapeIndex;
       const bl = shapeBlend.v;
       const smoothBl = bl * bl * (3 - 2 * bl);
-      const shapeY = (sp) => {
+      const shapeFlap = (sp) => {
         if (sp.wingS > 0) {
-          return sp.y - Math.sin(flapPhase - sp.wingS * 1.6) * Math.pow(sp.wingS, 1.2) * 0.30;
+          return sp.y - Math.sin(fp.flapPhase - sp.wingS * 1.6) * Math.pow(sp.wingS, 1.2) * fp.flapAmp;
         }
         return sp.y;
       };
@@ -1181,20 +1469,22 @@
         const pa = p.shapes[from];
         const pb = p.shapes[to];
         const bx = pa.x + (pb.x - pa.x) * smoothBl;
-        const by = shapeY(pa) + (shapeY(pb) - shapeY(pa)) * smoothBl;
+        const by = shapeFlap(pa) + (shapeFlap(pb) - shapeFlap(pa)) * smoothBl;
         const bz = pa.z + (pb.z - pa.z) * smoothBl;
         const colorT = pa.colorT + (pb.colorT - pa.colorT) * smoothBl;
         const dim = pa.dim + (pb.dim - pa.dim) * smoothBl;
+        const wingS = (pa.wingS || 0) + ((pb.wingS || 0) - (pa.wingS || 0)) * smoothBl;
         const drift = Math.sin(effT * p.driftFreq + p.seed * 40) * p.driftAmp;
-        const lx = bx + p.scatter.x * scatterT + drift;
-        const ly = by + p.scatter.y * scatterT + Math.cos(effT * p.driftFreq * 0.8 + p.seed * 25) * p.driftAmp;
-        const lz = bz + p.scatter.z * scatterT;
+        const lx0 = bx + p.scatter.x * scatterT + drift;
+        const ly0 = by + p.scatter.y * scatterT + Math.cos(effT * p.driftFreq * 0.8 + p.seed * 25) * p.driftAmp;
+        const lz0 = bz + p.scatter.z * scatterT;
+        const o = orientLocal(lx0, ly0, lz0, wingS, fp);
         const idx3 = i * 3;
-        positions[idx3] = cx + (lx + lz * shearX) * figureScale;
-        positions[idx3 + 1] = cy + (ly + lz * shearY) * figureScale;
-        positions[idx3 + 2] = lz * figureScale;
+        positions[idx3] = cx + o.x * figureScale;
+        positions[idx3 + 1] = cy + o.y * figureScale;
+        positions[idx3 + 2] = o.z * figureScale;
         // Depth cues: nearer particles are bigger and brighter
-        const zf = clamp(1 + lz * 0.9, 0.55, 1.45);
+        const zf = clamp(1 + o.z * 0.9, 0.55, 1.45);
         const flicker = 0.75 + 0.25 * Math.sin(effT * 2.1 + p.seed * 30);
         const c = lerpPalette(colorT);
         const alpha = formation * dim * (0.6 + 0.4 * zf) * flicker;
@@ -1264,31 +1554,187 @@
       commitGroup(ghostGroup);
     }
 
+    // Sample one point of a thread. `s` is thread-local (0 = tail, 1 = head
+    // toward the core); the world position along the edge→core ray is the
+    // sliding window u = progress + s·threadLength, so the WHOLE thread body
+    // moves inward as progress advances — the string itself gets sucked in.
+    function sampleChargePath(p, s, cx, cy, radius, flow, edge, out) {
+      const u = clamp(p.progress + s * p.threadLength, 0, 1);
+      const innerR = Math.max(3, radius * 0.06);
+      const ix = cx + edge.dx * innerR;
+      const iy = cy + edge.dy * innerR;
+      // Ease slightly so travel accelerates as threads near the core
+      const t = u * u * (3 - 2 * u);
+      const bx = edge.x + (ix - edge.x) * t;
+      const by = edge.y + (iy - edge.y) * t;
+
+      const px = -edge.dy;
+      const py = edge.dx;
+      // Noodle slurp: the free tail (s = 0) swings wide while the head being
+      // sucked is pulled taut, and the core pinch straightens the last stretch.
+      const sEnv = Math.pow(1 - s * s, 0.75);
+      const pinch = Math.pow(1 - u, 1.15);
+      // The overall arc breathes slowly instead of holding one frozen bow
+      const bowOff = p.bow * Math.sin(effT * p.bowRate + p.phase * 2)
+        * edge.dist * sEnv * (0.3 + 0.7 * pinch);
+      const amp = p.waveAmp * edge.dist * sEnv * pinch * (0.5 + 0.5 * chargeLevel);
+      // Three traveling waves, each with its own breathing amplitude.
+      // Opposite travel directions + independently modulated amplitudes make
+      // the curve genuinely morph — swell, flatten, roll — instead of one
+      // frozen squiggle sliding inward.
+      const m1 = 0.6 + 0.4 * Math.sin(effT * p.modRate1 + p.phase);
+      const m2 = 0.6 + 0.4 * Math.sin(effT * p.modRate2 + p.phase * 1.7);
+      const m3 = 0.6 + 0.4 * Math.sin(effT * p.modRate3 + p.phase * 0.5);
+      const wave =
+        Math.sin(s * p.waveFreq1 * Math.PI * 2 - flow + p.phase) * m1 * p.waveW1
+        + Math.sin(s * p.waveFreq2 * Math.PI * 2 + flow * 1.6 + p.phase * 1.7) * m2 * p.waveW2
+        + Math.sin(s * p.waveFreq3 * Math.PI * 2 - flow * 2.3 + p.phase * 0.5) * m3 * p.waveW3;
+
+      const off = bowOff + wave * amp;
+      out.x = bx + px * off;
+      out.y = by + py * off;
+      out.z = 0;
+      out.u = u;
+      return out;
+    }
+
+    function writeFilamentRibbon(layer, path, halfWidth, brightness, flowPhase, packets) {
+      const { positions, colors, posAttr, colAttr, segments } = layer;
+      const TWO_PI = Math.PI * 2;
+      for (let i = 0; i <= segments; i++) {
+        const pt = path[i];
+        const prev = path[Math.max(0, i - 1)];
+        const next = path[Math.min(segments, i + 1)];
+        let tx = next.x - prev.x;
+        let ty = next.y - prev.y;
+        const tLen = Math.hypot(tx, ty) || 1;
+        tx /= tLen;
+        ty /= tLen;
+        const px = -ty;
+        const py = tx;
+        const s = i / segments;
+        const u = pt.u;
+        const sinS = Math.sin(s * Math.PI);
+        // Threads thin as they near the core (world-space taper) and sharpen
+        // to fine points at both ends instead of blunt cut-offs
+        const w = halfWidth * (0.25 + 0.75 * Math.pow(1 - u, 0.55)) * (0.25 + 0.75 * Math.pow(sinS, 0.6));
+        // Feathered tips + slightly brighter head
+        const tipFade = Math.pow(sinS, 0.55);
+        const along = (0.55 + 0.45 * s) * tipFade;
+        // Brighten toward the convergence so the core stays the hottest point
+        const worldB = 0.35 + 0.65 * Math.pow(u, 1.2);
+        // Clean absorption: fade the last stretch before the core
+        const coreFadeT = clamp((u - 0.94) / 0.06, 0, 1);
+        const coreFade = 1 - coreFadeT * coreFadeT * (3 - 2 * coreFadeT);
+        // Soft packets riding the thread — secondary cue, the geometry itself moves
+        const pk = 0.5 + 0.5 * Math.sin((s * packets - flowPhase) * TWO_PI);
+        const pulse = 0.6 + 0.4 * pk * pk;
+        const base = i * 2 * 3;
+        positions[base] = pt.x + px * w;
+        positions[base + 1] = pt.y + py * w;
+        positions[base + 2] = pt.z;
+        positions[base + 3] = pt.x - px * w;
+        positions[base + 4] = pt.y - py * w;
+        positions[base + 5] = pt.z;
+
+        const c = lerpPalette(1 - u * 0.75);
+        const a = brightness * along * worldB * coreFade * pulse;
+        colors[base] = c.r * a;
+        colors[base + 1] = c.g * a;
+        colors[base + 2] = c.b * a;
+        colors[base + 3] = c.r * a;
+        colors[base + 4] = c.g * a;
+        colors[base + 5] = c.b * a;
+      }
+      posAttr.needsUpdate = true;
+      colAttr.needsUpdate = true;
+    }
+
+    const beadScratch = { x: 0, y: 0, z: 0, u: 0 };
     function updateCharge(cx, cy, radius) {
       const activity = chargeActivity;
       const visible = activity > 0.01;
-      chargeGroup.points.visible = visible;
+      const beads = chargeGroup.beads;
+      for (const f of chargeGroup.filaments) {
+        f.aura.mesh.visible = visible;
+        f.core.mesh.visible = visible;
+      }
+      beads.points.visible = visible;
+      // Track effect-time delta here so threads only advance while drawn
+      const dtE = chargeGroup.prevT === null ? 0 : Math.min(Math.max(effT - chargeGroup.prevT, 0), 0.05);
+      chargeGroup.prevT = effT;
       if (!visible) return;
 
-      const { positions, colors, sizes, model, count } = chargeGroup;
+      const path = chargeGroup.pathScratch;
+      const screenW = window.innerWidth;
+      const screenH = window.innerHeight;
+      // WebGL path has no bloom — lift brightness so filaments still read on projector/CI
+      const glow = forceWebGL ? 2.4 : 1;
+      // Suction speed ramps hard with charge — power being drawn in
+      const suckSpeed = 0.8 + 2.4 * chargeLevel;
+      const filaments = chargeGroup.filaments;
+
+      for (const f of filaments) {
+        // The thread body itself slides toward the core; past the core it
+        // respawns beyond the screen edge with a reshuffled shape.
+        f.progress += dtE * f.suckRate * suckSpeed;
+        if (f.progress >= 1) {
+          f.progress = -f.threadLength * (1 + Math.random() * 0.6);
+          f.phase = Math.random() * Math.PI * 2;
+          f.bow = (Math.random() - 0.5) * 0.18;
+        }
+
+        // Cache per-frame values for the bead pass below
+        f.edge = rayPastScreenEdge(cx, cy, f.startAngle, screenW, screenH);
+        f.flow = effT * f.speed + f.phase;
+        for (let i = 0; i <= CHARGE_SEGMENTS; i++) {
+          sampleChargePath(f, i / CHARGE_SEGMENTS, cx, cy, radius, f.flow, f.edge, path[i]);
+        }
+
+        const flowPhase = effT * (1.2 + 2.8 * chargeLevel) * f.flowSpeed + f.phase;
+        // Ribbons are faint continuous trails under the bead streams
+        const auraBright = activity * (0.5 + 0.5 * chargeLevel) * f.brightMul * 0.2 * glow;
+        const coreBright = activity * (0.6 + 0.8 * chargeLevel) * f.brightMul * 0.8 * glow;
+        const widthMul = (1 + chargeLevel * 0.5) * (forceWebGL ? 1.35 : 1);
+
+        writeFilamentRibbon(f.aura, path, f.widthAura * widthMul, auraBright, flowPhase, f.packets);
+        writeFilamentRibbon(f.core, path, f.widthCore * widthMul, coreBright, flowPhase + 0.15, f.packets);
+      }
+
+      // Bead pass: glowing particles riding the threads. They inherit the
+      // sliding window + wave motion, so the streams sparkle while rushing in.
+      const { positions, colors, sizes, model, count } = beads;
+      const beadBase = activity * (0.7 + 0.9 * chargeLevel) * glow;
       for (let i = 0; i < count; i++) {
-        const p = model[i];
-        const t = (effT * p.speed + p.seed) % 1;
-        const inward = t * t;
-        const dist = (2.6 - 2.45 * inward) * radius;
-        const angle = p.seed * Math.PI * 2 + t * p.twist;
+        const b = model[i];
+        const f = filaments[b.threadIndex];
+        const pt = sampleChargePath(f, b.sOffset, cx, cy, radius, f.flow, f.edge, beadScratch);
+        const depth = f.depth;
         const idx3 = i * 3;
-        positions[idx3] = cx + Math.cos(angle) * dist;
-        positions[idx3 + 1] = cy + Math.sin(angle) * dist;
+        // Perpendicular scatter gives the stream body; near layers spread more
+        const scatter = b.scatter * (1 + depth * 1.5);
+        positions[idx3] = pt.x - f.edge.dy * scatter;
+        positions[idx3 + 1] = pt.y + f.edge.dx * scatter;
         positions[idx3 + 2] = 0;
-        const fade = Math.pow(t, 1.4) * activity;
-        const c = lerpPalette(1 - t);
+
+        const u = pt.u;
+        // Gentler ramp than the ribbons so beads sparkle along the whole
+        // stream, not just at the core; same absorption window at the end
+        const worldB = 0.5 + 0.5 * u;
+        const coreFadeT = clamp((u - 0.94) / 0.06, 0, 1);
+        const coreFade = 1 - coreFadeT * coreFadeT * (3 - 2 * coreFadeT);
+        // Hide beads sitting in the clamped off-screen tail
+        const alive = u > 0.001 ? 1 : 0;
+        const flicker = 0.55 + 0.45 * Math.sin(effT * b.flickFreq * (0.8 + depth * 0.6) + b.flickPhase);
+        // Near bokeh dots are bigger but dimmer per-pixel; far dots small and sharp
+        const fade = beadBase * b.brightMul * worldB * coreFade * alive * flicker * (1.15 - depth * 0.55);
+        const c = lerpPalette(b.colorT);
         colors[idx3] = c.r * fade;
         colors[idx3 + 1] = c.g * fade;
         colors[idx3 + 2] = c.b * fade;
-        sizes[i] = p.size * (0.6 + 1.6 * t) * (1 + chargeLevel);
+        sizes[i] = b.sizeBase * (1.6 + depth * 4) * (1 + chargeLevel * 0.4);
       }
-      commitGroup(chargeGroup);
+      commitGroup(beads);
     }
 
     function updateBursts(tMs) {
@@ -1442,8 +1888,13 @@
     if (isTestMode) {
       // particlesOnly hides the disc/halo meshes for that one frame, so the
       // probe attributes light to the instanced sprite pipeline specifically.
-      window.__probeFrame = (particlesOnly = false) =>
-        new Promise((resolve) => probeRequests.push({ resolve, particlesOnly }));
+      // chargeOnly also hides spotlight grain so only filament ribbons remain.
+      window.__probeFrame = (opts = false) =>
+        new Promise((resolve) => {
+          const particlesOnly = opts === true || !!(opts && opts.particlesOnly);
+          const chargeOnly = !!(opts && opts.chargeOnly);
+          probeRequests.push({ resolve, particlesOnly, chargeOnly });
+        });
     }
 
     // ---- Main loop -------------------------------------------------------
@@ -1463,6 +1914,11 @@
         ghostActive,
         paletteIndex,
         auraShape: auraShapeIndex,
+        spotShape: spotShapeIndex,
+        bodyCloudReady: !!bodyCloud,
+        flightIntent,
+        flightHeadingAmount,
+        cruiseActive,
         charging,
         chargeLevel,
         blackoutActive,
@@ -1501,6 +1957,34 @@
       currentX = clamp(smoothFollow(currentX, targetX, FOLLOW_RATE, dt), 0, w);
       currentY = clamp(smoothFollow(currentY, targetY, FOLLOW_RATE, dt), 0, h);
 
+      // Flight velocity from spotlight travel — drives bank, heading, flap rate
+      flightRefSpeed = MOVE_SPEED * Math.min(w, h);
+      if (prevFlightX === null) {
+        prevFlightX = currentX;
+        prevFlightY = currentY;
+      }
+      const rawVx = (currentX - prevFlightX) / Math.max(dt, 1e-4);
+      const rawVy = (currentY - prevFlightY) / Math.max(dt, 1e-4);
+      prevFlightX = currentX;
+      prevFlightY = currentY;
+      flightVx = smoothFollow(flightVx, rawVx, 10, dt);
+      flightVy = smoothFollow(flightVy, rawVy, 10, dt);
+      flightSpeed01 = clamp(Math.hypot(flightVx, flightVy) / Math.max(flightRefSpeed, 1), 0, 1);
+
+      // Hysteretic cruise: heading tracks travel only on a deliberate push.
+      // Soft nudges and post-release settle keep the last heading (fading out).
+      if (cruiseActive) {
+        if (flightIntent < CRUISE_EXIT_INTENT) cruiseActive = false;
+      } else if (flightIntent >= CRUISE_ENTER_INTENT && flightSpeed01 >= CRUISE_ENTER_SPEED) {
+        cruiseActive = true;
+      }
+      if (cruiseActive) {
+        // Default silhouette faces −Y (up); rotate so −Y maps onto travel dir
+        const targetRot = Math.atan2(flightVy, flightVx) + Math.PI * 0.5;
+        flightHeading = smoothAngle(flightHeading, targetRot, 5, dt);
+      }
+      flightHeadingAmount = smoothFollow(flightHeadingAmount, cruiseActive ? 1 : 0, cruiseActive ? 6 : 7, dt);
+
       if (echoAX === null) { echoAX = currentX; echoAY = currentY; echoBX = currentX; echoBY = currentY; }
       echoAX = smoothFollow(echoAX, currentX, 7, dt);
       echoAY = smoothFollow(echoAY, currentY, 7, dt);
@@ -1533,6 +2017,8 @@
       discMidUniform.value.setRGB(c1.r, c1.g, c1.b);
       discRimUniform.value.setRGB(c2.r, c2.g, c2.b);
       discBrightUniform.value = brightMul;
+      const roundF = spotRoundness();
+      discShapeFadeUniform.value = 0.16 + 0.84 * roundF;
       discMesh.position.set(currentX, currentY, -20);
       discMesh.scale.setScalar(spotRadius);
       haloMesh.position.set(currentX, currentY, -20);
@@ -1540,7 +2026,7 @@
 
       updateEcho(echoGroupB, echoBX, echoBY, spotRadius * 1.1, ghostF, lerpStops(GHOST_STOPS, 0.9), 0.18);
       updateEcho(echoGroupA, echoAX, echoAY, spotRadius * 1.05, ghostF, lerpStops(GHOST_STOPS, 0.5), 0.3);
-      updateSpotlight(currentX, currentY, spotRadius, sizeMul, brightMul);
+      updateSpotlight(currentX, currentY, spotRadius, sizeMul, brightMul, roundF);
       updateCharge(currentX, currentY, spotRadius);
       updateFigure(currentX, currentY, figureScale, auraF);
       updateEmbers(currentX, currentY, figureScale, auraF);
@@ -1563,9 +2049,21 @@
       const pending = probing ? probeRequests : null;
       if (probing) probeRequests = [];
       const particlesOnly = probing && pending.some((p) => p.particlesOnly);
-      if (particlesOnly) {
+      const chargeOnly = probing && pending.some((p) => p.chargeOnly);
+      if (particlesOnly || chargeOnly) {
         discMesh.visible = false;
         haloMesh.visible = false;
+      }
+      if (chargeOnly) {
+        spotlightGroup.points.visible = false;
+        echoGroupA.points.visible = false;
+        echoGroupB.points.visible = false;
+        figureGroup.points.visible = false;
+        emberGroup.points.visible = false;
+        ghostGroup.points.visible = false;
+        burstGroup.points.visible = false;
+        for (const wave of burstGroup.waves) wave.mesh.visible = false;
+        flashMesh.visible = false;
       }
 
       if (post) post.render();
@@ -1579,9 +2077,13 @@
           result = -1;
         }
         for (const p of pending) p.resolve(result);
-        if (particlesOnly) {
+        if (particlesOnly || chargeOnly) {
           discMesh.visible = true;
           haloMesh.visible = true;
+        }
+        if (chargeOnly) {
+          spotlightGroup.points.visible = true;
+          flashMesh.visible = true;
         }
       }
 

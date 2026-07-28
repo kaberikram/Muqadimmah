@@ -5,7 +5,7 @@ A fully static projection light show driven by a **gamepad** — one HTML file, 
 ## Stack
 
 - **Projector**: a single self-contained page (`public/index.html`) — vanilla JS, Three.js WebGPU/TSL, animejs for feel
-- **Particles**: instanced sprites (one draw call per effect) with per-instance position/color/size read by TSL nodes — WebGPU can only draw 1px point primitives, so fat particles must be instanced quads. Falls back to WebGL2 automatically; `?webgl=1` forces it
+- **Particles**: instanced sprites (one draw call per effect) with per-instance position/color/size read by TSL nodes — WebGPU can only draw 1px point primitives, so fat particles must be instanced quads. Charge uses continuous ribbon meshes (triangle strips) instead of sprites so the RT hold reads as luminous filaments. Falls back to WebGL2 automatically; `?webgl=1` forces it
 - **Input**: browser [Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), polled every animation frame. Non-standard pads get an on-screen warning — button indices assume the `standard` mapping
 - **Audio**: [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API) analyser over `getUserMedia` — any input device (built-in mic, USB audio interface) works
 
@@ -32,7 +32,7 @@ Connect a controller and **press any button** — browsers only expose a gamepad
 | **LB** | Tap | Ghost aura — cold spectral wisps + lagging afterimages of the spot |
 | **RB** | Tap | Stand — a violet second figure materializes beside the spot |
 | **LT** | Hold (analog) | Slow motion — dilates effect time, control stays real-time |
-| **RT** | Hold (analog) | Charge — particles spiral inward, spot pinches and overdrives; **release** detonates a nova scaled by charge |
+| **RT** | Hold (analog) | Charge — luminous ribbons stream in from beyond the screen edges and converge on the spot; **release** detonates a nova scaled by charge |
 | **Select** | Tap | Audio-reactive mode — asks for mic/interface, scene pulses to the signal |
 | **Start** | Tap | HUD overlay — controls + live status (palette, bands, charge, time) |
 | **L3** | Tap | Blackout — instant fade to black (panic button for live use) |
