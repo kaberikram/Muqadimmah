@@ -127,6 +127,13 @@
     // realtime frame rate (effect clocks accumulate real dt per frame).
     const lowRes = pageParams.get('lowres') === '1';
 
+    // Feel overrides for on-site tuning — these are judgement calls best made in
+    // the room with the projector running, and a venue machine is awkward to edit.
+    function numParam(name, fallback, lo, hi) {
+      const raw = parseFloat(pageParams.get(name));
+      return Number.isFinite(raw) ? Math.min(hi, Math.max(lo, raw)) : fallback;
+    }
+
     const connectView = document.getElementById('connect-view');
     const canvas = document.getElementById('spotlight-canvas');
     const hudEl = document.getElementById('hud');
@@ -134,11 +141,14 @@
     const toastEl = document.getElementById('toast');
 
     // ---- Tunables --------------------------------------------------------
-    const MOVE_SPEED = 1.1;       // full-deflection travel, screen-fractions/sec
-    const STICK_DEADZONE = 0.12;  // radial dead zone (drift rejection)
-    const STICK_EXPO = 1.6;       // >1 = finer control near center
+    // Tuned for follow-spot work: a slow, placeable creep matters more than a
+    // fast whip-around when you're tracking a walking performer.
+    const MOVE_SPEED = numParam('speed', 0.55, 0.1, 3);  // full-deflection travel, screen-fractions/sec
+    const MOVE_ACCEL = numParam('accel', 5, 0.5, 40);    // how fast travel speed ramps in and out
+    const STICK_DEADZONE = 0.09;  // radial dead zone (drift rejection)
+    const STICK_EXPO = 1.35;      // >1 = finer control near center
     const INVERT_Y = false;       // flip if your controller's Y axis feels backwards
-    const FOLLOW_RATE = 15;       // spotlight easing toward the pointer (lower = more float)
+    const FOLLOW_RATE = 20;       // spotlight easing toward the pointer (lower = more float)
 
     // Standard gamepad mapping (Xbox layout) — every button does something
     const BTN_BURST = 0;      // A       tap: burst
@@ -173,8 +183,10 @@
     const SLOWMO_DEPTH = 0.78;        // full LT pull → timeScale = 1 - this
 
     const RADIUS_BASE_DEFAULT = 0.22; // spot radius as a fraction of min(w,h)
-    const RADIUS_BASE_STEP = 0.035;
-    const RADIUS_BASE_MIN = 0.10;
+    // Geometric stepping: a fixed step is a third of the range at the small end,
+    // so the tight sizes were impossible to dial in.
+    const RADIUS_BASE_RATIO = 1.22;
+    const RADIUS_BASE_MIN = numParam('minsize', 0.045, 0.01, 0.3);
     const RADIUS_BASE_MAX = 0.42;
     const RADIUS_BASE_RATE = 9;       // how fast the spot eases onto a new size
 
@@ -293,6 +305,11 @@
     let windX = 0;
     let windY = 0;
 
+    // Commanded travel speed (screen-fractions/sec), eased toward the stick so
+    // the spot leans into and out of motion instead of snapping to full speed.
+    let moveVx = 0;
+    let moveVy = 0;
+
     // Flight feel — smoothed travel velocity of the spotlight (px/s)
     let flightVx = 0;
     let flightVy = 0;
@@ -352,12 +369,15 @@
         rot,
         cosH: Math.cos(rot),
         sinH: Math.sin(rot),
-        bankX: (flightVx / Math.max(flightRefSpeed, 1)) * 0.55 * bankBlend,
-        bankY: (flightVy / Math.max(flightRefSpeed, 1)) * 0.40 * bankBlend,
+        bankX: (flightVx / Math.max(flightRefX, 1)) * 0.55 * bankBlend,
+        bankY: (flightVy / Math.max(flightRefY, 1)) * 0.40 * bankBlend,
         flapPhase,
         flapAmp,
-        // Residual bob when still — dies off while darting
-        bob: Math.sin(effT * 2.2) * 0.018 * (1 - flightSpeed01 * 0.75),
+        // Residual bob when parked. Faded by whichever of travel speed and stick
+        // intent is larger — intent is instant, so touching the stick settles the
+        // grain immediately instead of a sixth of a second later.
+        bob: Math.sin(effT * 2.2) * 0.007
+          * (1 - clamp(Math.max(flightSpeed01, flightIntent) * 1.5, 0, 1)),
       };
     }
 
@@ -374,7 +394,12 @@
       };
     }
 
-    let flightRefSpeed = 1; // updated each frame from viewport + MOVE_SPEED
+    // Per-axis speed references, updated each frame from viewport + MOVE_SPEED.
+    // One shared min(w,h) reference made horizontal motion register ~1.8x higher
+    // than vertical on 16:9, so the pose damped differently depending on which
+    // way you pushed.
+    let flightRefX = 1;
+    let flightRefY = 1;
 
     function resizeCanvas() {
       if (!renderer || !camera) return;
@@ -424,11 +449,15 @@
         return;
       }
 
-      // Left stick — move the spotlight (velocity model)
+      // Left stick — move the spotlight (velocity model with an acceleration
+      // ramp: the stick commands a speed, and actual speed eases toward it, so
+      // slow creeps are placeable and hand tremor gets low-passed away).
       const stick = applyStickCurve(gp.axes[0] || 0, gp.axes[1] || 0);
       const ySign = INVERT_Y ? -1 : 1;
-      pointerX = clamp(pointerX + stick.x * MOVE_SPEED * dt, 0, 1);
-      pointerY = clamp(pointerY + stick.y * ySign * MOVE_SPEED * dt, 0, 1);
+      moveVx = smoothFollow(moveVx, stick.x * MOVE_SPEED, MOVE_ACCEL, dt);
+      moveVy = smoothFollow(moveVy, stick.y * ySign * MOVE_SPEED, MOVE_ACCEL, dt);
+      pointerX = clamp(pointerX + moveVx * dt, 0, 1);
+      pointerY = clamp(pointerY + moveVy * dt, 0, 1);
       flightIntent = stick.mag;
 
       // Heading follows the stick, not the doubly-lagged travel velocity: the
@@ -502,12 +531,12 @@
       }
       if (edge(BTN_SPOTSHAPE)) cycleSpotShape(1);
       if (edge(BTN_DPAD_UP)) {
-        radiusBase = clamp(radiusBase + RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
-        toast(`SPOT ${Math.round(radiusBase * 100)}`);
+        radiusBase = clamp(radiusBase * RADIUS_BASE_RATIO, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
+        toast(`SPOT ${spotLabel()}`);
       }
       if (edge(BTN_DPAD_DOWN)) {
-        radiusBase = clamp(radiusBase - RADIUS_BASE_STEP, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
-        toast(`SPOT ${Math.round(radiusBase * 100)}`);
+        radiusBase = clamp(radiusBase / RADIUS_BASE_RATIO, RADIUS_BASE_MIN, RADIUS_BASE_MAX);
+        toast(`SPOT ${spotLabel()}`);
       }
       if (edge(BTN_DPAD_LEFT)) cyclePalette(-1);
       if (edge(BTN_DPAD_RIGHT)) cyclePalette(1);
@@ -661,6 +690,23 @@
 
     function baseRadius(w, h) {
       return Math.min(w, h) * radiusBaseView;
+    }
+
+    // Particle grain is sized in CSS pixels and the camera is orthographic, so
+    // sprite size is otherwise independent of the spot radius — shrink the spot
+    // and you get the same fat dots spread over a smaller disc until it reads as
+    // a clump. Scale grain with radius to hold the dots-across count roughly
+    // constant; the floor stops tiny spots dissolving into invisible specks.
+    function grainScaleFor(radius) {
+      const ref = RADIUS_BASE_DEFAULT * Math.min(window.innerWidth, window.innerHeight);
+      return clamp(radius / Math.max(ref, 1), 0.45, 1.5);
+    }
+
+    // One decimal below 10 — geometric steps at the tight end are under a whole
+    // percent apart, and a rounded integer would repeat itself.
+    function spotLabel() {
+      const pct = radiusBase * 100;
+      return pct < 10 ? pct.toFixed(1) : String(Math.round(pct));
     }
 
     // ---- WebGPU / TSL particle scene --------------------------------------
@@ -1259,7 +1305,9 @@
 
       // Spotlight body — a real gradient disc + wide halo so the spot always
       // reads as a beam of light, with the particle grain layered on top.
-      discMesh = makeGradientDisc(1.1, 0.95);
+      // Falloff 1.1 was near-linear, holding the disc near full brightness right
+      // out to its edge; 1.5 tapers earlier so it reads tighter at the same radius.
+      discMesh = makeGradientDisc(1.5, 0.95);
       haloMesh = makeGradientDisc(2.4, forceWebGL ? 0.28 : 0.18);
       scene.add(haloMesh, discMesh);
 
@@ -1392,6 +1440,7 @@
       const smoothBl = bl * bl * (3 - 2 * bl);
       const scaleA = SPOT_SHAPES[from].scale;
       const scaleB = SPOT_SHAPES[to].scale;
+      const grainScale = grainScaleFor(radius);
       const fp = flightPose();
       // Round SPOT: ease heading toward identity so the disc stays circular.
       // Blending the heading vector rather than scaling the angle keeps this
@@ -1439,13 +1488,15 @@
         positions[idx3 + 1] = cy + ly;
         positions[idx3 + 2] = lz;
         const zf = clamp(1 + lz / Math.max(radius, 1e-4) * 0.8, 0.6, 1.4);
-        const flicker = 0.7 + 0.3 * Math.sin(effT * 5 + p.seed * 30);
+        // Shallow scintillation — at ±30% this boiled visibly when the spot was
+        // parked on a performer, and it never damps with speed.
+        const flicker = 0.84 + 0.16 * Math.sin(effT * 5 + p.seed * 30);
         const falloff = dim * brightMul * grainBoost * (0.7 + 0.3 * zf) * flicker;
         const c = lerpPalette(colorT);
         colors[idx3] = c.r * falloff;
         colors[idx3 + 1] = c.g * falloff;
         colors[idx3 + 2] = c.b * falloff;
-        sizes[i] = (2 + dim * 5) * sizeMul * p.jitter * zf;
+        sizes[i] = (2 + dim * 5) * sizeMul * p.jitter * zf * grainScale;
       }
       commitGroup(spotlightGroup);
     }
@@ -1455,6 +1506,7 @@
       group.points.visible = visible;
       if (!visible) return;
       const { positions, colors, sizes, model, count, seeds } = group;
+      const grainScale = grainScaleFor(radius);
       for (let i = 0; i < count; i++) {
         const { r, a } = model[i];
         const dist = r * radius;
@@ -1467,7 +1519,7 @@
         colors[idx3] = tint.r * fade;
         colors[idx3 + 1] = tint.g * fade;
         colors[idx3 + 2] = tint.b * fade;
-        sizes[i] = 1.5 + (1 - r) * 4.5;
+        sizes[i] = (1.5 + (1 - r) * 4.5) * grainScale;
       }
       commitGroup(group);
     }
@@ -1874,7 +1926,7 @@
       if (!hudVisible) return;
       const parts = [
         PALETTES[paletteIndex].name,
-        `SPOT ${Math.round(radiusBase * 100)}`,
+        `SPOT ${spotLabel()}`,
         audioEnabled ? `AUDIO ●  BASS ${audio.bass.toFixed(2)}  MID ${audio.mid.toFixed(2)}  TREB ${audio.treb.toFixed(2)}` : 'AUDIO ○',
       ];
       if (timeScale < 0.98) parts.push(`TIME ×${timeScale.toFixed(2)}`);
@@ -1989,7 +2041,8 @@
       currentY = clamp(smoothFollow(currentY, targetY, FOLLOW_RATE, dt), 0, h);
 
       // Flight velocity from spotlight travel — drives bank, heading, flap rate
-      flightRefSpeed = MOVE_SPEED * Math.min(w, h);
+      flightRefX = MOVE_SPEED * w;
+      flightRefY = MOVE_SPEED * h;
       if (prevFlightX === null) {
         prevFlightX = currentX;
         prevFlightY = currentY;
@@ -2000,7 +2053,12 @@
       prevFlightY = currentY;
       flightVx = smoothFollow(flightVx, rawVx, 10, dt);
       flightVy = smoothFollow(flightVy, rawVy, 10, dt);
-      flightSpeed01 = clamp(Math.hypot(flightVx, flightVy) / Math.max(flightRefSpeed, 1), 0, 1);
+      // Normalise each axis by its own dimension so a diagonal push reads the
+      // same speed whichever way it leans.
+      flightSpeed01 = clamp(
+        Math.hypot(flightVx / Math.max(flightRefX, 1), flightVy / Math.max(flightRefY, 1)),
+        0, 1
+      );
 
       // Hysteretic cruise: heading tracks travel only on a deliberate push.
       // Soft nudges and post-release settle keep the last heading (fading out).
@@ -2062,7 +2120,9 @@
       discMesh.position.set(currentX, currentY, -20);
       discMesh.scale.setScalar(spotRadius);
       haloMesh.position.set(currentX, currentY, -20);
-      haloMesh.scale.setScalar(spotRadius * 2.2);
+      // 2.2 made the glow 4.4x the spot across, so a "small" setting still threw
+      // a wide pool of light in a dark room.
+      haloMesh.scale.setScalar(spotRadius * 1.7);
 
       updateEcho(echoGroupB, echoBX, echoBY, spotRadius * 1.1, ghostF, lerpStops(GHOST_STOPS, 0.9), 0.18);
       updateEcho(echoGroupA, echoAX, echoAY, spotRadius * 1.05, ghostF, lerpStops(GHOST_STOPS, 0.5), 0.3);
