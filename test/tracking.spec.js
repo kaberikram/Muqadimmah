@@ -8,6 +8,7 @@ const {
   getHook,
   waitForTestHook,
   sampleCurrentX,
+  sampleHookKey,
   peakToPeak,
   sleep,
 } = require('./helpers');
@@ -121,6 +122,98 @@ test('releasing after cruise fades heading without low-speed spin', async ({ pag
   expect(hook.cruiseActive).toBe(false);
   expect(hook.flightHeadingAmount).toBeLessThan(0.25);
   expect(hook.flightHeadingAmount).toBeLessThan(cruiseHeadingAmt);
+});
+
+// Wrap into [−π, π) so sampled headings can be differenced across the branch cut.
+function wrapPi(a) {
+  return a - Math.PI * 2 * Math.floor((a + Math.PI) / (Math.PI * 2));
+}
+
+// Total absolute angle travelled by a sampled heading, wrap-aware.
+function sweptDistance(angles) {
+  let total = 0;
+  for (let i = 1; i < angles.length; i++) {
+    total += Math.abs(wrapPi(angles[i] - angles[i - 1]));
+  }
+  return total;
+}
+
+// Walk the stick around a full circle at full deflection, `turns` times.
+async function circleStick(page, turns, stepMs = 50, stepsPerTurn = 16) {
+  for (let i = 0; i < turns * stepsPerTurn; i++) {
+    const a = (i / stepsPerTurn) * Math.PI * 2;
+    await setAxes(page, Math.cos(a), Math.sin(a));
+    await sleep(stepMs);
+  }
+}
+
+test('circling the stick never accumulates whole turns of heading', async ({ page }) => {
+  await setAxes(page, 1, 0);
+  await sleep(400);
+  expect((await getHook(page)).cruiseActive).toBe(true);
+
+  await circleStick(page, 3);
+
+  const hook = await getHook(page);
+  expect(hook.cruiseActive).toBe(true);
+  // Before the fix these accumulated ~6π after three laps.
+  expect(Math.abs(hook.flightHeading)).toBeLessThanOrEqual(Math.PI + 1e-6);
+  expect(Math.abs(hook.poseHeading)).toBeLessThanOrEqual(Math.PI + 1e-6);
+
+  await setAxes(page, 0, 0);
+});
+
+test('releasing after a long turn unwinds at most half a turn', async ({ page }) => {
+  await setAxes(page, 1, 0);
+  await sleep(400);
+  await circleStick(page, 3);
+  await setAxes(page, 0, 0);
+
+  const poses = await sampleHookKey(page, 'poseHeading', 1200);
+  expect(poses.length).toBeGreaterThan(5);
+  // The spin bug showed up here: the pose used to unwind every accumulated lap.
+  expect(sweptDistance(poses)).toBeLessThan(Math.PI + 0.2);
+
+  const hook = await getHook(page);
+  expect(hook.cruiseActive).toBe(false);
+  expect(Math.abs(hook.poseHeading)).toBeLessThan(0.3);
+});
+
+test('a hard stick reversal turns without whipping', async ({ page }) => {
+  await setAxes(page, 1, 0);
+  await sleep(900); // let the heading settle onto the stick before reversing
+  const before = await getHook(page);
+  expect(before.cruiseActive).toBe(true);
+  expect(before.flightHeading).toBeCloseTo(Math.PI / 2, 1);
+
+  await setAxes(page, -1, 0);
+  const headings = await sampleHookKey(page, 'flightHeading', 1200);
+  expect(headings.length).toBeGreaterThan(5);
+  // A 180° reversal is exactly half a turn — anything more is a whip.
+  expect(sweptDistance(headings)).toBeLessThan(Math.PI + 0.3);
+
+  const after = await getHook(page);
+  expect(after.flightHeading).toBeCloseTo(-Math.PI / 2, 1);
+
+  await setAxes(page, 0, 0);
+});
+
+test('heading follows the stick while pinned against a screen edge', async ({ page }) => {
+  await setAxes(page, -1, 0);
+  await sleep(1500);
+  expect((await getHook(page)).pointerX).toBe(0);
+
+  // Pinned left: the pointer can only travel down, but the stick says down-left.
+  await setAxes(page, -0.7, 0.7);
+  await sleep(900);
+
+  const hook = await getHook(page);
+  expect(hook.pointerX).toBe(0);
+  expect(hook.cruiseActive).toBe(true);
+  // Heading tracks the stick (−3π/4), not the edge-parallel travel (π).
+  expect(hook.flightHeading).toBeCloseTo(-Math.PI * 0.75, 1);
+
+  await setAxes(page, 0, 0);
 });
 
 test('A button spawns a burst that expires', async ({ page }) => {

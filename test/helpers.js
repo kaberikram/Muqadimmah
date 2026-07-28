@@ -101,15 +101,19 @@ async function waitForTestHook(page, timeoutMs = 15000) {
   );
 }
 
-async function sampleCurrentX(page, durationMs, intervalMs = 16) {
+async function sampleHookKey(page, key, durationMs, intervalMs = 16) {
   const samples = [];
   const end = Date.now() + durationMs;
   while (Date.now() < end) {
-    const x = await page.evaluate(() => window.__spotlightTestHook?.currentX);
-    if (typeof x === 'number') samples.push(x);
+    const v = await page.evaluate((k) => window.__spotlightTestHook?.[k], key);
+    if (typeof v === 'number') samples.push(v);
     await sleep(intervalMs);
   }
   return samples;
+}
+
+function sampleCurrentX(page, durationMs, intervalMs = 16) {
+  return sampleHookKey(page, 'currentX', durationMs, intervalMs);
 }
 
 function peakToPeak(values) {
@@ -151,5 +155,6 @@ module.exports = {
   getHook,
   waitForTestHook,
   sampleCurrentX,
+  sampleHookKey,
   peakToPeak,
 };

@@ -298,6 +298,9 @@
     let flightIntent = 0;         // left-stick magnitude after deadzone/curve
     let flightHeading = 0;        // last cruise heading (radians from upright −Y)
     let flightHeadingAmount = 0;  // 0 = upright pose, 1 = full cruise yaw
+    let poseHeading = 0;          // smoothed visual yaw, always wrapped
+    let stickDirX = 0;
+    let stickDirY = -1;           // upright default: travelling up-screen === heading 0
     let cruiseActive = false;
     let prevFlightX = null;
     let prevFlightY = null;
@@ -306,6 +309,8 @@
     const CRUISE_ENTER_INTENT = 0.38;
     const CRUISE_EXIT_INTENT = 0.20;
     const CRUISE_ENTER_SPEED = 0.22;
+    const HEADING_RATE = 5;       // how eagerly heading chases the stick
+    const MAX_TURN_RATE = 7;      // rad/s ceiling so a 180° flip reads as a turn
 
     // Ghost afterimage lag positions
     let echoAX = null, echoAY = null;
@@ -328,15 +333,21 @@
       return current + d * (1 - Math.exp(-rate * dt));
     }
 
+    // Wrap an angle into [−π, π) so a heading can never accumulate whole turns.
+    function wrapPi(a) {
+      return a - Math.PI * 2 * Math.floor((a + Math.PI) / (Math.PI * 2));
+    }
+
     // Shared flight pose for spotlight + aura silhouettes.
     function flightPose() {
       const flapAmp = 0.30 + flightSpeed01 * 0.18;
       const flapPhase = effT * (5.2 + audio.level * 3.5 + flightSpeed01 * 4.5);
       // Visual yaw only while actively cruising — fades out on soft stick / release
-      const rot = flightHeading * flightHeadingAmount;
+      const rot = poseHeading;
       const bankBlend = 0.25 + 0.75 * flightHeadingAmount;
       return {
         speed01: flightSpeed01,
+        rot,
         cosH: Math.cos(rot),
         sinH: Math.sin(rot),
         bankX: (flightVx / Math.max(flightRefSpeed, 1)) * 0.55 * bankBlend,
@@ -417,6 +428,14 @@
       pointerX = clamp(pointerX + stick.x * MOVE_SPEED * dt, 0, 1);
       pointerY = clamp(pointerY + stick.y * ySign * MOVE_SPEED * dt, 0, 1);
       flightIntent = stick.mag;
+
+      // Heading follows the stick, not the doubly-lagged travel velocity: the
+      // latter passes through zero on a reversal (making atan2 meaningless) and
+      // goes sideways when the pointer clamps against a screen edge.
+      if (stick.mag > 0) {
+        stickDirX = stick.x / stick.mag;
+        stickDirY = (stick.y * ySign) / stick.mag;
+      }
 
       // Non-standard pads report different indices/axes; warn once so a
       // misbehaving layout is diagnosable instead of mysterious.
@@ -1372,12 +1391,17 @@
       const scaleA = SPOT_SHAPES[from].scale;
       const scaleB = SPOT_SHAPES[to].scale;
       const fp = flightPose();
-      // Round SPOT: keep heading nearly identity so the disc stays circular
+      // Round SPOT: ease heading toward identity so the disc stays circular.
+      // Blending the heading vector rather than scaling the angle keeps this
+      // continuous through ±π — i.e. straight-down travel no longer flips.
       const birdish = 1 - roundF;
+      const hx = 1 + (fp.cosH - 1) * birdish;
+      const hy = fp.sinH * birdish;
+      const hInv = 1 / Math.max(Math.hypot(hx, hy), 1e-4);
       const fpSpot = {
         ...fp,
-        cosH: birdish > 0.01 ? Math.cos(Math.atan2(fp.sinH, fp.cosH) * birdish) : 1,
-        sinH: birdish > 0.01 ? Math.sin(Math.atan2(fp.sinH, fp.cosH) * birdish) : 0,
+        cosH: hx * hInv,
+        sinH: hy * hInv,
         bankX: fp.bankX * (0.35 + 0.65 * birdish),
         bankY: fp.bankY * (0.35 + 0.65 * birdish),
       };
@@ -1917,7 +1941,11 @@
         spotShape: spotShapeIndex,
         bodyCloudReady: !!bodyCloud,
         flightIntent,
+        flightHeading,
         flightHeadingAmount,
+        poseHeading,
+        stickDirX,
+        stickDirY,
         cruiseActive,
         charging,
         chargeLevel,
@@ -1979,10 +2007,16 @@
         cruiseActive = true;
       }
       if (cruiseActive) {
-        // Default silhouette faces −Y (up); rotate so −Y maps onto travel dir
-        const targetRot = Math.atan2(flightVy, flightVx) + Math.PI * 0.5;
-        flightHeading = smoothAngle(flightHeading, targetRot, 5, dt);
+        // Default silhouette faces −Y (up); rotate so −Y maps onto the stick dir
+        const targetRot = Math.atan2(stickDirY, stickDirX) + Math.PI * 0.5;
+        const stepped = smoothAngle(flightHeading, targetRot, HEADING_RATE, dt);
+        const step = clamp(wrapPi(stepped - flightHeading), -MAX_TURN_RATE * dt, MAX_TURN_RATE * dt);
+        flightHeading = wrapPi(flightHeading + step);
       }
+      // Pose yaw is its own smoothed angle: engaging and releasing take the
+      // shortest arc to the target instead of linearly scaling an unwrapped
+      // heading, which used to unwind whole revolutions after circling.
+      poseHeading = wrapPi(smoothAngle(poseHeading, cruiseActive ? flightHeading : 0, cruiseActive ? 6 : 7, dt));
       flightHeadingAmount = smoothFollow(flightHeadingAmount, cruiseActive ? 1 : 0, cruiseActive ? 6 : 7, dt);
 
       if (echoAX === null) { echoAX = currentX; echoAY = currentY; echoBX = currentX; echoBY = currentY; }
