@@ -51,6 +51,27 @@ Press **Select** and grant microphone access — a USB audio interface shows up 
 
 Press Select again to release the device.
 
+**No interface?** Play the music out loud and let the built-in mic hear it — fine for driving bass/mid/treble envelopes. For a clean signal without hardware, install a virtual loopback device (BlackHole on macOS, VB-Audio Cable or Stereo Mix on Windows; PulseAudio/PipeWire already publishes a "Monitor of …" source on Linux) and select it as the system default input.
+
+## `/peaceful` — the second show
+
+A separate page at `public/peaceful/index.html`, served at `/peaceful`. Warm light panels receding into black, human silhouettes backlit in front of them, and hard cuts on the beat.
+
+Where the projector is orthographic and screen-flat, this one is a **perspective** scene in world units — the left stick orbits the camera, so the panels parallax against each other and the frame has real depth. Panels are TSL box-gradient quads with per-panel uniforms; figures are the baked `body-cloud.js` point cloud rendered as instanced quads that blend *multiplicatively* (`dst *= 1−α`), making them pure light-blockers rather than dark sprites. Each figure stands just in front of its own panel — staging them all at one depth breaks alignment under perspective and they vanish. On WebGPU a post stack adds bloom, chromatic aberration, vignette, film grain and scanlines.
+
+A cut reseeds the whole composition — panel count and layout, 1–3 figures, brightness, colour — fired by beat detection (rate-limited so it lands on accents, not every kick) with an idle fallback so the scene keeps moving with audio off. Between cuts it barely moves, which is what makes the snap read as a cut.
+
+| Control | Action |
+| --- | --- |
+| **L-stick** | Orbit camera (the main depth cue) |
+| **R-stick** | Dolly · panel depth spread |
+| **A** / **RT** | Cut now / hold to charge, release cuts |
+| **B** | Figures on/off |
+| **D-pad ↑↓ / ←→** | Panel count / palette |
+| **LT** · **L3** · **Select** · **Start** | Slow-mo · blackout · audio · HUD |
+
+Shared helpers live in `public/lib/` (`math`, `palette`, `audio`, `gamepad`) as DOM-free ES modules. `public/index.html` still carries its own inline copies and is untouched.
+
 ## Feel & tuning
 
 Movement is a **velocity model**: stick deflection sets speed and direction, so you can park the spot on a performer and let go. A radial dead zone rejects stick drift, and an expo curve gives fine control near center with fast sweeps at full deflection.
@@ -77,3 +98,7 @@ npm test
 ```
 
 Playwright loads the page over `file://` with a mock gamepad injected, then drives both sticks, the triggers, and every button to verify movement, dead zone, clamping, charge/nova, slow-mo, palettes, blackout, strobe, HUD, audio toggle, and each effect. A pixel-probe spec additionally reads the rendered canvas back and asserts real light hits the screen (and that blackout kills it) — state tests alone once let an invisible-particle regression through. Tests force the WebGL2 backend at reduced resolution; headless software WebGPU is flaky.
+
+`/peaceful` has its own specs covering cuts, panel count, palette, orbit easing and charge, plus a probe asserting the silhouettes actually remove light. Its probe takes `{ noHalos: true }` to hide the additive head glows — they add back more light than the bodies remove and would flip the comparison — and `window.__setIdleCuts(false)` freezes the composition so two frames stay comparable.
+
+If Playwright can't find a browser, point it at one: `PW_CHROMIUM_PATH=/path/to/chrome npm test`.
