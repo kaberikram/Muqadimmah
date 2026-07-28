@@ -358,6 +358,29 @@ test('D-pad up/down adjusts base spot size', async ({ page }) => {
   expect(hook.radiusBase).toBeCloseTo(before, 5);
 });
 
+test('a D-pad size step eases in instead of snapping', async ({ page }) => {
+  const before = await getHook(page);
+  expect(before.radiusBaseView).toBeCloseTo(before.radiusBase, 5);
+
+  await setButton(page, BUTTONS.DPAD_UP, true);
+  const views = await sampleHookKey(page, 'radiusBaseView', 500);
+  await setButton(page, BUTTONS.DPAD_UP, false);
+
+  const after = await getHook(page);
+  expect(after.radiusBase).toBeGreaterThan(before.radiusBase);
+
+  // A snap would only ever show the two endpoints.
+  const mid = views.filter(
+    (v) => v > before.radiusBase + 1e-4 && v < after.radiusBase - 1e-4
+  );
+  expect(mid.length).toBeGreaterThan(0);
+
+  // ...and the eased value must actually arrive at the target.
+  await sleep(500);
+  const settled = await getHook(page);
+  expect(settled.radiusBaseView).toBeCloseTo(settled.radiusBase, 3);
+});
+
 test('RB cycles the spotlight shape and wraps', async ({ page }) => {
   await tapButton(page, BUTTONS.SPOT_SHAPE);
   let hook = await getHook(page);

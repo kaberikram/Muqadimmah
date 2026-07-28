@@ -176,6 +176,7 @@
     const RADIUS_BASE_STEP = 0.035;
     const RADIUS_BASE_MIN = 0.10;
     const RADIUS_BASE_MAX = 0.42;
+    const RADIUS_BASE_RATE = 9;       // how fast the spot eases onto a new size
 
     // ---- Palettes (D-pad ←→ cycles; t: 0 = core, 1 = rim) -----------------
     const PALETTES = [
@@ -273,7 +274,8 @@
     let blackoutActive = false;
     let hudVisible = false;
     let radiusScale = 1;
-    let radiusBase = RADIUS_BASE_DEFAULT;
+    let radiusBase = RADIUS_BASE_DEFAULT;      // D-pad target, steps instantly
+    let radiusBaseView = RADIUS_BASE_DEFAULT;  // eased value the spot is drawn at
     let bursts = [];
     let auraPhase = 0;
 
@@ -658,7 +660,7 @@
     }
 
     function baseRadius(w, h) {
-      return Math.min(w, h) * radiusBase;
+      return Math.min(w, h) * radiusBaseView;
     }
 
     // ---- WebGPU / TSL particle scene --------------------------------------
@@ -1932,6 +1934,7 @@
         gamepadConnected,
         radiusScale,
         radiusBase,
+        radiusBaseView,
         activeBurstCount: bursts.length,
         auraActive,
         expandActive,
@@ -2027,6 +2030,9 @@
 
       const expandTarget = expandActive ? EXPAND_TARGET_SCALE : 1;
       radiusScale = smoothFollow(radiusScale, expandTarget, EXPAND_SPRING_RATE, dt);
+      // D-pad size steps ease in rather than snapping; the toast/HUD still read
+      // the target immediately so the number matches the press.
+      radiusBaseView = smoothFollow(radiusBaseView, radiusBase, RADIUS_BASE_RATE, dt);
 
       updateAudio(dt, now);
       cullEffects(effMs);
